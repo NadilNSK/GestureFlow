@@ -12,10 +12,12 @@ References
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+import cv2
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
@@ -115,9 +117,14 @@ class HandLandmarkerWrapper:
     def close(self) -> None:
         """Release the HandLandmarker resources."""
         if self._landmarker:
-            self._landmarker.close()
-            self._landmarker = None
+            try:
+                self._landmarker.close()
+            except Exception as exc:
+                log.debug("HandLandmarker close exception: %s", exc)
+            finally:
+                self._landmarker = None
             log.info("HandLandmarker closed.")
+            time.sleep(0.05)
 
     def __enter__(self) -> "HandLandmarkerWrapper":
         self.open()
@@ -149,8 +156,8 @@ class HandLandmarkerWrapper:
         if self._landmarker is None:
             raise RuntimeError("HandLandmarkerWrapper.open() must be called first.")
 
-        # MediaPipe Tasks expects RGB.
-        rgb = bgr_frame[:, :, ::-1]
+        # MediaPipe Tasks expects contiguous RGB.
+        rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
         try:

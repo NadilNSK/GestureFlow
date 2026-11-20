@@ -107,6 +107,63 @@ class PipelineWorker(QObject):
         if self._pipeline:
             self._pipeline.mouse_controller.set_smoothing(val)
 
+    def set_precision_mode(self, enabled: bool) -> None:
+        """Enable or disable precision aiming mode."""
+        if self._pipeline:
+            self._pipeline.mouse_controller.set_precision_mode(enabled)
+
+    def set_filter_type(self, filter_type: str) -> None:
+        """Set smoothing filter algorithm ('one_euro' or 'ema')."""
+        if self._pipeline:
+            self._pipeline.mouse_controller.set_filter_type(filter_type)
+
+    def set_one_euro_params(
+        self,
+        min_cutoff: float | None = None,
+        beta: float | None = None,
+        d_cutoff: float | None = None,
+    ) -> None:
+        """Update One Euro filter parameters."""
+        if self._pipeline:
+            self._pipeline.mouse_controller.set_one_euro_params(min_cutoff, beta, d_cutoff)
+
+    def set_calibrator(self, calibrator) -> None:
+        """Assign calibrated calibrator to mouse controller."""
+        if self._pipeline:
+            self._pipeline.mouse_controller.set_calibrator(calibrator)
+
+    def set_action_enabled(self, action_name: str, enabled: bool) -> None:
+        """Enable or disable an individual mouse gesture action."""
+        if not self._pipeline:
+            return
+        c_settings = self._pipeline.mouse_controller.settings
+        act = action_name.lower().strip()
+        if act == "left_click":
+            c_settings.left_click_enabled = bool(enabled)
+        elif act == "right_click":
+            c_settings.right_click_enabled = bool(enabled)
+        elif act == "double_click":
+            c_settings.double_click_enabled = bool(enabled)
+        elif act == "drag":
+            c_settings.drag_enabled = bool(enabled)
+        elif act == "scroll":
+            c_settings.scroll_enabled = bool(enabled)
+
+    def set_drag_hold_duration(self, val: float) -> None:
+        """Update required hold duration before drag activates."""
+        if self._pipeline:
+            self._pipeline.mouse_controller.settings.drag_hold_duration = max(0.15, min(2.0, float(val)))
+
+    def set_double_click_interval(self, val: float) -> None:
+        """Update maximum interval for double-click pinches."""
+        if self._pipeline:
+            self._pipeline.mouse_controller.settings.double_click_interval = max(0.10, min(1.5, float(val)))
+
+    def set_scroll_sensitivity(self, val: float) -> None:
+        """Update vertical scroll sensitivity."""
+        if self._pipeline:
+            self._pipeline.mouse_controller.settings.scroll_sensitivity = max(0.1, min(10.0, float(val)))
+
     def stop_pipeline(self) -> None:
         """Stop the camera and release model resources. Called in the worker thread."""
         log.info("PipelineWorker: stopping pipeline…")

@@ -377,6 +377,10 @@ class CameraCapture:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._settings.frame_width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._settings.frame_height)
         cap.set(cv2.CAP_PROP_FPS, self._settings.fps)
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
 
         actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))

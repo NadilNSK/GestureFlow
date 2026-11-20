@@ -68,6 +68,29 @@ class ControllerSettings:
     cursor_update_interval: float = 0.010
     cursor_jump_threshold: float = 250.0
 
+    # Phase 2B.1 additions:
+    smoothing_filter_type: str = "ema"  # "one_euro" or "ema" (default_settings.json uses "one_euro")
+    one_euro_min_cutoff: float = 1.0
+    one_euro_beta: float = 0.007
+    one_euro_d_cutoff: float = 1.0
+    precision_mode: bool = False
+    precision_multiplier: float = 0.35
+    max_cursor_velocity: float = 4000.0  # max pixels per second
+    calibration_data: dict[str, Any] | None = None
+
+    # Phase 2C additions (Mouse Actions & Gestures):
+    left_click_enabled: bool = True
+    right_click_enabled: bool = True
+    double_click_enabled: bool = True
+    drag_enabled: bool = True
+    scroll_enabled: bool = True
+    click_cooldown: float = 0.20
+    double_click_interval: float = 0.35
+    drag_hold_duration: float = 0.45
+    scroll_sensitivity: float = 1.0
+    scroll_dead_zone: float = 0.008
+    scroll_update_interval: float = 0.04
+
 
 @dataclass
 class UiSettings:
@@ -123,6 +146,22 @@ class Settings:
         self.controller.cursor_dead_zone = max(0.0, float(self.controller.cursor_dead_zone))
         self.controller.tracking_region_margin = max(0.0, min(0.45, float(self.controller.tracking_region_margin)))
         self.controller.cursor_jump_threshold = max(10.0, float(self.controller.cursor_jump_threshold))
+        self.controller.smoothing_filter_type = (
+            "one_euro" if str(self.controller.smoothing_filter_type).lower() == "one_euro" else "ema"
+        )
+        self.controller.one_euro_min_cutoff = max(0.01, min(10.0, float(self.controller.one_euro_min_cutoff)))
+        self.controller.one_euro_beta = max(0.0, min(1.0, float(self.controller.one_euro_beta)))
+        self.controller.one_euro_d_cutoff = max(0.01, min(10.0, float(self.controller.one_euro_d_cutoff)))
+        self.controller.precision_multiplier = max(0.05, min(1.0, float(self.controller.precision_multiplier)))
+        self.controller.max_cursor_velocity = max(100.0, float(self.controller.max_cursor_velocity))
+
+        # Validate Phase 2C controller settings
+        self.controller.click_cooldown = max(0.05, min(2.0, float(self.controller.click_cooldown)))
+        self.controller.double_click_interval = max(0.10, min(1.5, float(self.controller.double_click_interval)))
+        self.controller.drag_hold_duration = max(0.15, min(2.0, float(self.controller.drag_hold_duration)))
+        self.controller.scroll_sensitivity = max(0.1, min(10.0, float(self.controller.scroll_sensitivity)))
+        self.controller.scroll_dead_zone = max(0.001, min(0.1, float(self.controller.scroll_dead_zone)))
+        self.controller.scroll_update_interval = max(0.01, min(0.5, float(self.controller.scroll_update_interval)))
 
     @classmethod
     def load(

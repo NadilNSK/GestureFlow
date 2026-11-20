@@ -64,6 +64,14 @@ class PipelineFrame:
     active_hand: Optional[HandLandmarks] = None
     cursor_coords: Optional[tuple[int, int]] = None
     mouse_state: str = "DISABLED"
+    is_precision_mode: bool = False
+    is_calibrated: bool = False
+    is_dragging: bool = False
+    mouse_action: str = "NONE"
+    left_click_count: int = 0
+    right_click_count: int = 0
+    double_click_count: int = 0
+    scroll_direction: str = "IDLE"
 
 
 class TrackingPipeline:
@@ -146,7 +154,10 @@ class TrackingPipeline:
         mouse_state = self._mouse_controller.state.value
         if self._mouse_controller.is_enabled and not self._settings.camera.use_mock_camera:
             try:
-                cursor_coords = self._mouse_controller.process_hand(active_hand, gesture_result)
+                ts_sec = float(camera_frame.timestamp_ms) / 1000.0 if camera_frame.timestamp_ms else None
+                cursor_coords = self._mouse_controller.process_hand(
+                    active_hand, gesture_result, timestamp=ts_sec
+                )
                 mouse_state = self._mouse_controller.state.value
             except Exception as exc:
                 mouse_state = self._mouse_controller.state.value
@@ -176,6 +187,14 @@ class TrackingPipeline:
             active_hand=active_hand,
             cursor_coords=cursor_coords,
             mouse_state=mouse_state,
+            is_precision_mode=self._mouse_controller.is_precision_mode,
+            is_calibrated=self._mouse_controller.calibrator.is_calibrated,
+            is_dragging=self._mouse_controller.is_dragging,
+            mouse_action=self._mouse_controller.last_action,
+            left_click_count=self._mouse_controller.left_click_count,
+            right_click_count=self._mouse_controller.right_click_count,
+            double_click_count=self._mouse_controller.double_click_count,
+            scroll_direction=self._mouse_controller.scroll_direction,
         )
 
     # ------------------------------------------------------------------
@@ -236,15 +255,46 @@ class TrackingPipeline:
     # ------------------------------------------------------------------
 
     def _draw_tracking_region(self, bgr: np.ndarray, is_mouse_enabled: bool) -> np.ndarray:
-        """Render active tracking region rectangle on camera preview frame."""
+        """Render active tracking region rectangle or calibrated polygon on camera preview frame."""
         h, w = bgr.shape[:2]
+        calib = self._mouse_controller.calibrator
+        is_prec = self._mouse_controller.is_precision_mode
+
+        if calib.is_calibrated and calib.data.camera_points:
+            pts = []
+            for corner in ["TL", "TR", "BR", "BL"]:
+                if corner in calib.data.camera_points:
+                    cx, cy = calib.data.camera_points[corner]
+                    pts.append((int(cx * w), int(cy * h)))
+            if len(pts) == 4:
+                poly = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
+                poly_color = (0, 255, 255) if is_prec else ((0, 220, 255) if is_mouse_enabled else (80, 80, 80))
+                cv2.polylines(bgr, [poly], isClosed=True, color=poly_color, thickness=2, lineType=cv2.LINE_AA)
+                cv2.putText(
+                    bgr,
+                    "CALIBRATED ZONE" + (" [PRECISION]" if is_prec else ""),
+                    (pts[0][0] + 5, max(20, pts[0][1] - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42,
+                    poly_color,
+                    1,
+                    cv2.LINE_AA,
+                )
+                return bgr
+
         m = self._settings.controller.tracking_region_margin
         rx1 = int(w * m)
         ry1 = int(h * m)
         rx2 = int(w * (1.0 - m))
         ry2 = int(h * (1.0 - m))
 
-        box_color = (255, 220, 0) if is_mouse_enabled else (70, 70, 70)  # Cyan if mouse enabled, muted gray if disabled
+        if is_prec:
+            box_color = (0, 255, 255)  # Yellow in precision mode
+        elif is_mouse_enabled:
+            box_color = (255, 220, 0)  # Cyan
+        else:
+            box_color = (70, 70, 70)   # Muted gray
+
         cv2.rectangle(bgr, (rx1, ry1), (rx2, ry2), box_color, 1, cv2.LINE_AA)
 
         # Draw corner accents

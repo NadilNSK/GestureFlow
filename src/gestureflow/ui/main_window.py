@@ -40,11 +40,13 @@ from PySide6.QtWidgets import (
     QFrame,
     QSlider,
     QComboBox,
+    QCheckBox,
 )
 
 from gestureflow.camera.capture import discover_available_cameras, DiscoveredCamera
 from gestureflow.config.settings import Settings
 from gestureflow.tracking.pipeline import PipelineFrame
+from gestureflow.ui.calibration_dialog import CalibrationDialog
 from gestureflow.ui.workers import PipelineWorker
 
 log = logging.getLogger(__name__)
@@ -105,6 +107,7 @@ class MainWindow(QMainWindow):
         self._thread: QThread | None = None
         self._frame_count = 0
         self._log_handler: _QtLogHandler | None = None
+        self._calibration_dialog: CalibrationDialog | None = None
 
         self._build_ui()
         self._apply_dark_theme()
@@ -181,6 +184,20 @@ class MainWindow(QMainWindow):
 
         toolbar.addWidget(self._btn_mouse_enable)
         toolbar.addWidget(self._btn_mouse_disable)
+        toolbar.addSeparator()
+
+        self._btn_precision = QPushButton("🎯 Precision (Off)")
+        self._btn_precision.setObjectName("btn_precision")
+        self._btn_precision.setFixedHeight(32)
+        self._btn_precision.setCheckable(True)
+        self._btn_precision.clicked.connect(self._toggle_precision_mode)
+        toolbar.addWidget(self._btn_precision)
+
+        self._btn_calibrate = QPushButton("🎯 Calibrate")
+        self._btn_calibrate.setObjectName("btn_calibrate")
+        self._btn_calibrate.setFixedHeight(32)
+        self._btn_calibrate.clicked.connect(self._on_open_calibration)
+        toolbar.addWidget(self._btn_calibrate)
         toolbar.addSeparator()
 
         self._btn_emergency_stop = QPushButton("🛑 EMERGENCY STOP (Esc)")
@@ -332,6 +349,47 @@ class MainWindow(QMainWindow):
         smooth_row.addWidget(self._slider_smooth)
         mouse_layout.addLayout(smooth_row)
 
+        # Filter selection
+        filter_row = QHBoxLayout()
+        filter_lbl = QLabel("Filter:")
+        filter_lbl.setFixedWidth(50)
+        self._combo_filter = QComboBox()
+        self._combo_filter.setObjectName("combo_filter")
+        self._combo_filter.addItems(["One Euro Filter (Adaptive)", "EMA Smoothing (Classic)"])
+        if self._settings.controller.smoothing_filter_type == "one_euro":
+            self._combo_filter.setCurrentIndex(0)
+        else:
+            self._combo_filter.setCurrentIndex(1)
+        self._combo_filter.currentIndexChanged.connect(self._on_filter_changed)
+        filter_row.addWidget(filter_lbl)
+        filter_row.addWidget(self._combo_filter)
+        mouse_layout.addLayout(filter_row)
+
+        # Tracking region margin slider
+        margin_row = QHBoxLayout()
+        self._lbl_margin_val = QLabel(f"Margin: {int(self._settings.controller.tracking_region_margin * 100)}%")
+        self._lbl_margin_val.setFixedWidth(110)
+        self._slider_margin = QSlider(Qt.Orientation.Horizontal)
+        self._slider_margin.setRange(5, 35)
+        self._slider_margin.setValue(int(self._settings.controller.tracking_region_margin * 100))
+        self._slider_margin.valueChanged.connect(self._on_margin_slider_changed)
+        margin_row.addWidget(self._lbl_margin_val)
+        margin_row.addWidget(self._slider_margin)
+        mouse_layout.addLayout(margin_row)
+
+        # Calibration controls
+        self._btn_calibrate_card = QPushButton("🎯 Run 4-Point Calibration")
+        self._btn_calibrate_card.setObjectName("btn_calibrate_card")
+        self._btn_calibrate_card.clicked.connect(self._on_open_calibration)
+        mouse_layout.addWidget(self._btn_calibrate_card)
+
+        calib_txt = "Calibration: 4-Point Active ✔" if (self._settings.controller.calibration_data and self._settings.controller.calibration_data.get("is_active")) else "Calibration: Ready (Default Bounds)"
+        calib_col = "#00e676" if "✔" in calib_txt else "#888"
+        self._lbl_calibration_status = QLabel(calib_txt)
+        self._lbl_calibration_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_calibration_status.setStyleSheet(f"color: {calib_col}; font-size: 11px;")
+        mouse_layout.addWidget(self._lbl_calibration_status)
+
         # Reset Emergency Stop button
         self._btn_reset_emergency = QPushButton("Clear Emergency Stop")
         self._btn_reset_emergency.setObjectName("btn_reset_emergency")
@@ -341,7 +399,108 @@ class MainWindow(QMainWindow):
 
         side_layout.addWidget(mouse_group)
 
-        # 5. Device Info Card
+        # 5. Mouse Actions & Gestures Card (Phase 2C)
+        actions_group = QGroupBox("Mouse Actions & Gestures")
+        actions_layout = QVBoxLayout(actions_group)
+        actions_layout.setSpacing(4)
+
+        # Action status badge
+        self._lbl_action_badge = QLabel("ACTION: IDLE")
+        self._lbl_action_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_action_badge.setStyleSheet(
+            "background: #1e1e24; color: #aaa; font-weight: bold; font-size: 12px; "
+            "padding: 5px; border-radius: 4px; border: 1px solid #333;"
+        )
+        actions_layout.addWidget(self._lbl_action_badge)
+
+        # Metrics row: Last action & counters
+        metrics_row = QHBoxLayout()
+        self._lbl_last_action = QLabel("Last: NONE")
+        self._lbl_last_action.setStyleSheet("color: #00e5ff; font-size: 11px; font-weight: bold;")
+        self._lbl_action_counters = QLabel("Clicks: L: 0 | 2x: 0 | R: 0")
+        self._lbl_action_counters.setStyleSheet("color: #ccc; font-size: 11px;")
+        metrics_row.addWidget(self._lbl_last_action)
+        metrics_row.addStretch()
+        metrics_row.addWidget(self._lbl_action_counters)
+        actions_layout.addLayout(metrics_row)
+
+        # Status row: Drag & Scroll indicators
+        drag_scroll_row = QHBoxLayout()
+        self._lbl_drag_indicator = QLabel("Drag: INACTIVE")
+        self._lbl_drag_indicator.setStyleSheet("color: #777; font-size: 10px; font-weight: bold;")
+        self._lbl_scroll_indicator = QLabel("Scroll: IDLE")
+        self._lbl_scroll_indicator.setStyleSheet("color: #777; font-size: 10px; font-weight: bold;")
+        drag_scroll_row.addWidget(self._lbl_drag_indicator)
+        drag_scroll_row.addStretch()
+        drag_scroll_row.addWidget(self._lbl_scroll_indicator)
+        actions_layout.addLayout(drag_scroll_row)
+
+        # Action toggle checkboxes
+        chk_layout1 = QHBoxLayout()
+        self._chk_left_click = QCheckBox("Left Click")
+        self._chk_left_click.setChecked(self._settings.controller.left_click_enabled)
+        self._chk_left_click.toggled.connect(lambda v: self._on_toggle_action("left_click", v))
+        self._chk_double_click = QCheckBox("Double Click")
+        self._chk_double_click.setChecked(self._settings.controller.double_click_enabled)
+        self._chk_double_click.toggled.connect(lambda v: self._on_toggle_action("double_click", v))
+        self._chk_right_click = QCheckBox("Right Click")
+        self._chk_right_click.setChecked(self._settings.controller.right_click_enabled)
+        self._chk_right_click.toggled.connect(lambda v: self._on_toggle_action("right_click", v))
+        chk_layout1.addWidget(self._chk_left_click)
+        chk_layout1.addWidget(self._chk_double_click)
+        chk_layout1.addWidget(self._chk_right_click)
+        actions_layout.addLayout(chk_layout1)
+
+        chk_layout2 = QHBoxLayout()
+        self._chk_drag = QCheckBox("Drag & Drop")
+        self._chk_drag.setChecked(self._settings.controller.drag_enabled)
+        self._chk_drag.toggled.connect(lambda v: self._on_toggle_action("drag", v))
+        self._chk_scroll = QCheckBox("Vertical Scroll")
+        self._chk_scroll.setChecked(self._settings.controller.scroll_enabled)
+        self._chk_scroll.toggled.connect(lambda v: self._on_toggle_action("scroll", v))
+        chk_layout2.addWidget(self._chk_drag)
+        chk_layout2.addWidget(self._chk_scroll)
+        actions_layout.addLayout(chk_layout2)
+
+        # Drag hold duration slider
+        drag_row = QHBoxLayout()
+        self._lbl_drag_hold_val = QLabel(f"Drag Hold: {self._settings.controller.drag_hold_duration:.2f}s")
+        self._lbl_drag_hold_val.setFixedWidth(110)
+        self._slider_drag_hold = QSlider(Qt.Orientation.Horizontal)
+        self._slider_drag_hold.setRange(20, 100)  # 0.20s to 1.00s
+        self._slider_drag_hold.setValue(int(self._settings.controller.drag_hold_duration * 100))
+        self._slider_drag_hold.valueChanged.connect(self._on_drag_hold_slider_changed)
+        drag_row.addWidget(self._lbl_drag_hold_val)
+        drag_row.addWidget(self._slider_drag_hold)
+        actions_layout.addLayout(drag_row)
+
+        # Double-click window slider
+        dc_row = QHBoxLayout()
+        self._lbl_double_click_val = QLabel(f"2x Window: {self._settings.controller.double_click_interval:.2f}s")
+        self._lbl_double_click_val.setFixedWidth(110)
+        self._slider_double_click = QSlider(Qt.Orientation.Horizontal)
+        self._slider_double_click.setRange(15, 80)  # 0.15s to 0.80s
+        self._slider_double_click.setValue(int(self._settings.controller.double_click_interval * 100))
+        self._slider_double_click.valueChanged.connect(self._on_double_click_slider_changed)
+        dc_row.addWidget(self._lbl_double_click_val)
+        dc_row.addWidget(self._slider_double_click)
+        actions_layout.addLayout(dc_row)
+
+        # Scroll sensitivity slider
+        scroll_row = QHBoxLayout()
+        self._lbl_scroll_sens_val = QLabel(f"Scroll Sens: {self._settings.controller.scroll_sensitivity:.1f}x")
+        self._lbl_scroll_sens_val.setFixedWidth(110)
+        self._slider_scroll_sens = QSlider(Qt.Orientation.Horizontal)
+        self._slider_scroll_sens.setRange(2, 30)  # 0.2x to 3.0x
+        self._slider_scroll_sens.setValue(int(self._settings.controller.scroll_sensitivity * 10))
+        self._slider_scroll_sens.valueChanged.connect(self._on_scroll_sens_slider_changed)
+        scroll_row.addWidget(self._lbl_scroll_sens_val)
+        scroll_row.addWidget(self._slider_scroll_sens)
+        actions_layout.addLayout(scroll_row)
+
+        side_layout.addWidget(actions_group)
+
+        # 6. Device Info Card
         stats_group = QGroupBox("Device & System")
         stats_layout = QVBoxLayout(stats_group)
         stats_layout.setSpacing(3)
@@ -612,6 +771,101 @@ class MainWindow(QMainWindow):
         if self._worker:
             self._worker.set_smoothing(smooth)
 
+    @Slot()
+    def _toggle_precision_mode(self) -> None:
+        """Toggle precision aiming mode."""
+        is_active = not self._settings.controller.precision_mode
+        self._settings.controller.precision_mode = is_active
+        if hasattr(self, "_btn_precision"):
+            self._btn_precision.setChecked(is_active)
+            self._btn_precision.setText("🎯 Precision Mode (ON)" if is_active else "🎯 Precision (Off)")
+            self._btn_precision.setStyleSheet(
+                "background: #7a6000; color: #fff; font-weight: bold;" if is_active else ""
+            )
+        if self._worker:
+            self._worker.set_precision_mode(is_active)
+        log.info("Precision Mode toggled by user: %s", is_active)
+
+    @Slot(int)
+    def _on_filter_changed(self, index: int) -> None:
+        """Switch smoothing filter algorithm."""
+        filter_type = "one_euro" if index == 0 else "ema"
+        self._settings.controller.smoothing_filter_type = filter_type
+        if self._worker:
+            self._worker.set_filter_type(filter_type)
+        log.info("User changed cursor filter to: %s", filter_type)
+
+    @Slot(int)
+    def _on_margin_slider_changed(self, value: int) -> None:
+        """Update tracking region margin."""
+        m = value / 100.0
+        self._lbl_margin_val.setText(f"Margin: {value}%")
+        self._settings.controller.tracking_region_margin = m
+
+    @Slot()
+    def _on_open_calibration(self) -> None:
+        """Open interactive 4-point calibration dialog."""
+        calibrator = None
+        if self._worker and self._worker.mouse_controller:
+            calibrator = self._worker.mouse_controller.calibrator
+
+        self._calibration_dialog = CalibrationDialog(self._settings, calibrator=calibrator, parent=self)
+        self._calibration_dialog.calibration_completed.connect(self._on_calibration_completed)
+        self._calibration_dialog.show()
+
+    @Slot(object)
+    def _on_calibration_completed(self, calibrator) -> None:
+        """Handle completed calibration."""
+        if self._worker:
+            self._worker.set_calibrator(calibrator)
+        if hasattr(self, "_lbl_calibration_status"):
+            self._lbl_calibration_status.setText("Calibration: 4-Point Active ✔")
+            self._lbl_calibration_status.setStyleSheet("color: #00e676; font-size: 11px; font-weight: bold;")
+        log.info("4-point calibration applied to active pipeline.")
+
+    @Slot(str, bool)
+    def _on_toggle_action(self, action_name: str, enabled: bool) -> None:
+        """Toggle an individual gesture action."""
+        if self._worker:
+            self._worker.set_action_enabled(action_name, enabled)
+        act = action_name.lower().strip()
+        if act == "left_click":
+            self._settings.controller.left_click_enabled = enabled
+        elif act == "right_click":
+            self._settings.controller.right_click_enabled = enabled
+        elif act == "double_click":
+            self._settings.controller.double_click_enabled = enabled
+        elif act == "drag":
+            self._settings.controller.drag_enabled = enabled
+        elif act == "scroll":
+            self._settings.controller.scroll_enabled = enabled
+        self._settings.save_user_settings()
+        log.info("Action '%s' set to: %s", action_name, enabled)
+
+    @Slot(int)
+    def _on_drag_hold_slider_changed(self, value: int) -> None:
+        val = value / 100.0
+        self._lbl_drag_hold_val.setText(f"Drag Hold: {val:.2f}s")
+        self._settings.controller.drag_hold_duration = val
+        if self._worker:
+            self._worker.set_drag_hold_duration(val)
+
+    @Slot(int)
+    def _on_double_click_slider_changed(self, value: int) -> None:
+        val = value / 100.0
+        self._lbl_double_click_val.setText(f"2x Window: {val:.2f}s")
+        self._settings.controller.double_click_interval = val
+        if self._worker:
+            self._worker.set_double_click_interval(val)
+
+    @Slot(int)
+    def _on_scroll_sens_slider_changed(self, value: int) -> None:
+        val = value / 10.0
+        self._lbl_scroll_sens_val.setText(f"Scroll Sens: {val:.1f}x")
+        self._settings.controller.scroll_sensitivity = val
+        if self._worker:
+            self._worker.set_scroll_sensitivity(val)
+
     # ------------------------------------------------------------------
     # Slots from worker
     # ------------------------------------------------------------------
@@ -699,15 +953,41 @@ class MainWindow(QMainWindow):
         # 5. Update Virtual Mouse Telemetry
         m_state = getattr(pipeline_frame, "mouse_state", "DISABLED")
         coords = getattr(pipeline_frame, "cursor_coords", None)
+        is_prec = getattr(pipeline_frame, "is_precision_mode", False)
+        is_cal = getattr(pipeline_frame, "is_calibrated", False)
+
+        # Forward to active calibration dialog if open
+        if self._calibration_dialog and self._calibration_dialog.isVisible():
+            self._calibration_dialog.process_pipeline_frame(pipeline_frame)
+
+        if is_cal and hasattr(self, "_lbl_calibration_status"):
+            self._lbl_calibration_status.setText("Calibration: 4-Point Active ✔")
+            self._lbl_calibration_status.setStyleSheet("color: #00e676; font-size: 11px; font-weight: bold;")
 
         if m_state == "MOVING":
-            self._lbl_mouse_status.setText("MOUSE: ACTIVE (MOVING)")
+            status_text = "MOUSE: ACTIVE (PRECISION)" if is_prec else "MOUSE: ACTIVE (MOVING)"
+            self._lbl_mouse_status.setText(status_text)
             self._lbl_mouse_status.setStyleSheet(
                 "background: #143820; color: #00ff77; font-weight: bold; font-size: 13px; "
                 "padding: 6px; border-radius: 4px; border: 1px solid #00e676;"
             )
             if coords:
-                self._lbl_mouse_coords.setText(f"Cursor: ({coords[0]}, {coords[1]})")
+                prec_tag = " [PRECISION]" if is_prec else ""
+                self._lbl_mouse_coords.setText(f"Cursor: ({coords[0]}, {coords[1]}){prec_tag}")
+        elif m_state == "DRAGGING":
+            self._lbl_mouse_status.setText("MOUSE: DRAGGING ✊")
+            self._lbl_mouse_status.setStyleSheet(
+                "background: #4a2600; color: #ffab40; font-weight: bold; font-size: 13px; "
+                "padding: 6px; border-radius: 4px; border: 1px solid #ff9100;"
+            )
+            if coords:
+                self._lbl_mouse_coords.setText(f"Cursor: ({coords[0]}, {coords[1]}) [DRAG]")
+        elif m_state == "SCROLLING":
+            self._lbl_mouse_status.setText("MOUSE: SCROLLING ↕")
+            self._lbl_mouse_status.setStyleSheet(
+                "background: #00332c; color: #64ffda; font-weight: bold; font-size: 13px; "
+                "padding: 6px; border-radius: 4px; border: 1px solid #1de9b6;"
+            )
         elif m_state == "EMERGENCY_STOPPED":
             self._lbl_mouse_status.setText("🛑 EMERGENCY STOPPED")
             self._lbl_mouse_status.setStyleSheet(
@@ -717,6 +997,12 @@ class MainWindow(QMainWindow):
             self._btn_mouse_enable.setEnabled(False)
             self._btn_mouse_disable.setEnabled(False)
             self._btn_reset_emergency.setEnabled(True)
+        elif m_state in ("LEFT_PINCH_PENDING", "CLICK_PENDING"):
+            self._lbl_mouse_status.setText("MOUSE: PINCH DETECTED")
+            self._lbl_mouse_status.setStyleSheet(
+                "background: #3e2723; color: #ffcc80; font-weight: bold; font-size: 13px; "
+                "padding: 6px; border-radius: 4px; border: 1px solid #ffb74d;"
+            )
         elif m_state == "IDLE":
             self._lbl_mouse_status.setText("MOUSE: READY (POINT TO MOVE)")
             self._lbl_mouse_status.setStyleSheet(
@@ -730,6 +1016,57 @@ class MainWindow(QMainWindow):
                     "background: #222; color: #888; font-weight: bold; font-size: 13px; "
                     "padding: 6px; border-radius: 4px; border: 1px solid #333;"
                 )
+
+        # 6. Update Phase 2C action telemetry & badges
+        act_state = getattr(pipeline_frame, "mouse_state", "DISABLED")
+        last_act = getattr(pipeline_frame, "mouse_action", "NONE")
+        is_drag = getattr(pipeline_frame, "is_dragging", False)
+        l_cnt = getattr(pipeline_frame, "left_click_count", 0)
+        d_cnt = getattr(pipeline_frame, "double_click_count", 0)
+        r_cnt = getattr(pipeline_frame, "right_click_count", 0)
+        s_dir = getattr(pipeline_frame, "scroll_direction", "IDLE")
+
+        if hasattr(self, "_lbl_action_badge"):
+            self._lbl_action_badge.setText(f"ACTION: {act_state}")
+            if act_state == "DRAGGING":
+                self._lbl_action_badge.setStyleSheet(
+                    "background: #4a2600; color: #ffab40; font-weight: bold; font-size: 12px; padding: 5px; border-radius: 4px; border: 1px solid #ff9100;"
+                )
+            elif act_state == "SCROLLING":
+                self._lbl_action_badge.setStyleSheet(
+                    "background: #00332c; color: #64ffda; font-weight: bold; font-size: 12px; padding: 5px; border-radius: 4px; border: 1px solid #1de9b6;"
+                )
+            elif act_state in ("LEFT_PINCH_PENDING", "CLICK_PENDING"):
+                self._lbl_action_badge.setStyleSheet(
+                    "background: #3e2723; color: #ffcc80; font-weight: bold; font-size: 12px; padding: 5px; border-radius: 4px; border: 1px solid #ffb74d;"
+                )
+            elif act_state == "MOVING":
+                self._lbl_action_badge.setStyleSheet(
+                    "background: #143820; color: #00ff77; font-weight: bold; font-size: 12px; padding: 5px; border-radius: 4px; border: 1px solid #00e676;"
+                )
+            else:
+                self._lbl_action_badge.setStyleSheet(
+                    "background: #1e1e24; color: #aaa; font-weight: bold; font-size: 12px; padding: 5px; border-radius: 4px; border: 1px solid #333;"
+                )
+
+        if hasattr(self, "_lbl_last_action"):
+            self._lbl_last_action.setText(f"Last: {last_act}")
+        if hasattr(self, "_lbl_action_counters"):
+            self._lbl_action_counters.setText(f"Clicks: L: {l_cnt} | 2x: {d_cnt} | R: {r_cnt}")
+        if hasattr(self, "_lbl_drag_indicator"):
+            if is_drag:
+                self._lbl_drag_indicator.setText("Drag: ACTIVE ✊")
+                self._lbl_drag_indicator.setStyleSheet("color: #ffab40; font-size: 10px; font-weight: bold;")
+            else:
+                self._lbl_drag_indicator.setText("Drag: INACTIVE")
+                self._lbl_drag_indicator.setStyleSheet("color: #777; font-size: 10px; font-weight: bold;")
+        if hasattr(self, "_lbl_scroll_indicator"):
+            if s_dir != "IDLE":
+                self._lbl_scroll_indicator.setText(f"Scroll: {s_dir} ↕")
+                self._lbl_scroll_indicator.setStyleSheet("color: #64ffda; font-size: 10px; font-weight: bold;")
+            else:
+                self._lbl_scroll_indicator.setText("Scroll: IDLE")
+                self._lbl_scroll_indicator.setStyleSheet("color: #777; font-size: 10px; font-weight: bold;")
 
     @Slot(str)
     def _on_pipeline_error(self, message: str) -> None:
@@ -796,11 +1133,27 @@ class MainWindow(QMainWindow):
                 )
         if hasattr(self, "_lbl_mouse_coords"):
             self._lbl_mouse_coords.setText("Cursor: (—, —)")
+        if hasattr(self, "_lbl_action_badge"):
+            self._lbl_action_badge.setText("ACTION: IDLE")
+            self._lbl_action_badge.setStyleSheet(
+                "background: #1e1e24; color: #aaa; font-weight: bold; font-size: 12px; padding: 5px; border-radius: 4px; border: 1px solid #333;"
+            )
+        if hasattr(self, "_lbl_last_action"):
+            self._lbl_last_action.setText("Last: NONE")
+        if hasattr(self, "_lbl_drag_indicator"):
+            self._lbl_drag_indicator.setText("Drag: INACTIVE")
+            self._lbl_drag_indicator.setStyleSheet("color: #777; font-size: 10px; font-weight: bold;")
+        if hasattr(self, "_lbl_scroll_indicator"):
+            self._lbl_scroll_indicator.setText("Scroll: IDLE")
+            self._lbl_scroll_indicator.setStyleSheet("color: #777; font-size: 10px; font-weight: bold;")
 
     def keyPressEvent(self, event) -> None:
-        """Esc key stops automation while the app has keyboard focus."""
+        """Esc key stops automation, P toggles precision mode."""
         if event.key() == Qt.Key.Key_Escape:
             self._on_emergency_stop()
+            event.accept()
+        elif event.key() == Qt.Key.Key_P:
+            self._toggle_precision_mode()
             event.accept()
         else:
             super().keyPressEvent(event)
