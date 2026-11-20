@@ -39,8 +39,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QFrame,
     QSlider,
+    QComboBox,
 )
 
+from gestureflow.camera.capture import discover_available_cameras, DiscoveredCamera
 from gestureflow.config.settings import Settings
 from gestureflow.tracking.pipeline import PipelineFrame
 from gestureflow.ui.workers import PipelineWorker
@@ -136,6 +138,33 @@ class MainWindow(QMainWindow):
 
         toolbar.addWidget(self._btn_start)
         toolbar.addWidget(self._btn_stop)
+        toolbar.addSeparator()
+
+        lbl_cam = QLabel(" Camera: ")
+        lbl_cam.setStyleSheet("font-weight: bold; color: #ccc;")
+        toolbar.addWidget(lbl_cam)
+
+        self._combo_camera = QComboBox()
+        self._combo_camera.setObjectName("combo_camera")
+        self._combo_camera.setFixedHeight(30)
+        self._combo_camera.setMinimumWidth(260)
+        self._combo_camera.setStyleSheet(
+            "QComboBox { background: #262626; color: #fff; padding: 2px 8px; border: 1px solid #444; border-radius: 4px; font-size: 11px; }"
+            "QComboBox::drop-down { border: none; }"
+            "QComboBox QAbstractItemView { background: #1f1f1f; color: #fff; selection-background-color: #2e7d32; }"
+        )
+        self._combo_camera.currentIndexChanged.connect(self._on_camera_combo_changed)
+        toolbar.addWidget(self._combo_camera)
+
+        self._btn_refresh_cameras = QPushButton("🔄 Refresh")
+        self._btn_refresh_cameras.setObjectName("btn_refresh_cameras")
+        self._btn_refresh_cameras.setFixedHeight(30)
+        self._btn_refresh_cameras.setStyleSheet(
+            "QPushButton#btn_refresh_cameras { background: #333; color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 2px 10px; font-size: 11px; }"
+            "QPushButton#btn_refresh_cameras:hover { background: #444; color: #fff; }"
+        )
+        self._btn_refresh_cameras.clicked.connect(self._on_refresh_cameras_clicked)
+        toolbar.addWidget(self._btn_refresh_cameras)
         toolbar.addSeparator()
 
         self._btn_mouse_enable = QPushButton("🖱  Enable Mouse")
@@ -316,11 +345,17 @@ class MainWindow(QMainWindow):
         stats_group = QGroupBox("Device & System")
         stats_layout = QVBoxLayout(stats_group)
         stats_layout.setSpacing(3)
+        cam_desc = (
+            "Mock Camera"
+            if self._settings.camera.use_mock_camera
+            else f"Device {self._settings.camera.device_index} ({self._settings.camera.backend})"
+        )
+        self._lbl_device_cam = QLabel(f"Camera: {cam_desc}")
         self._lbl_model = QLabel(f"Model: {Path(self._settings.tracking.model_path).name}")
         self._lbl_resolution = QLabel(
             f"Resolution: {self._settings.camera.frame_width}×{self._settings.camera.frame_height}"
         )
-        for lbl in (self._lbl_model, self._lbl_resolution):
+        for lbl in (self._lbl_device_cam, self._lbl_model, self._lbl_resolution):
             lbl.setWordWrap(True)
             stats_layout.addWidget(lbl)
         side_layout.addWidget(stats_group)
@@ -346,9 +381,99 @@ class MainWindow(QMainWindow):
         logging.getLogger().addHandler(self._log_handler)
 
         self._show_placeholder()
+        self._populate_cameras()
 
     # ------------------------------------------------------------------
-    # Pipeline control
+    # Camera selection & discovery
+    # ------------------------------------------------------------------
+
+    def _populate_cameras(self) -> None:
+        """Discover connected cameras using OpenCV CAP_DSHOW and populate the dropdown."""
+        self._combo_camera.blockSignals(True)
+        self._combo_camera.clear()
+
+        # Scan available cameras with DirectShow backend
+        cams = discover_available_cameras(max_indices=5, backend=self._settings.camera.backend)
+
+        selected_idx = 0
+        current_dev = self._settings.camera.device_index
+        is_mock = self._settings.camera.use_mock_camera
+
+        for idx, cam in enumerate(cams):
+            self._combo_camera.addItem(
+                cam.name,
+                {"index": cam.index, "is_mock": False, "available": cam.is_available},
+            )
+            # Match current device index if not running mock
+            if not is_mock and cam.index == current_dev:
+                selected_idx = idx
+
+        # Synthetic mock camera entry
+        mock_idx = len(cams)
+        self._combo_camera.addItem(
+            "Mock Camera (Simulated)",
+            {"index": -1, "is_mock": True, "available": True},
+        )
+        if is_mock:
+            selected_idx = mock_idx
+
+        self._combo_camera.setCurrentIndex(selected_idx)
+        self._combo_camera.blockSignals(False)
+
+    @Slot(int)
+    def _on_camera_combo_changed(self, index: int) -> None:
+        """Handle user selecting a different camera from the dropdown."""
+        data = self._combo_camera.itemData(index)
+        if not data:
+            return
+
+        # Requirement 10: Never enable virtual mouse control during camera switching.
+        if hasattr(self, "_btn_mouse_disable") and self._btn_mouse_disable.isEnabled():
+            self._on_disable_mouse()
+
+        new_dev_idx = data["index"]
+        new_is_mock = data["is_mock"]
+        is_avail = data.get("available", True)
+
+        log.info(
+            "Camera selection changed: device=%d mock=%s available=%s",
+            new_dev_idx,
+            new_is_mock,
+            is_avail,
+        )
+
+        # Update settings
+        if new_dev_idx >= 0:
+            self._settings.camera.device_index = new_dev_idx
+        self._settings.camera.use_mock_camera = new_is_mock
+        self._settings.save_user_settings()
+
+        # Update Device Card label
+        cam_desc = (
+            "Mock Camera"
+            if new_is_mock
+            else f"Device {new_dev_idx} ({self._settings.camera.backend})"
+        )
+        if hasattr(self, "_lbl_device_cam"):
+            self._lbl_device_cam.setText(f"Camera: {cam_desc}")
+
+        # If pipeline is currently running, release camera resources and restart
+        if self._thread and self._thread.isRunning():
+            log.info("Pipeline is active — stopping previous camera and switching...")
+            self._on_stop()
+            # Safety: Ensure mouse control stays disabled
+            self._on_disable_mouse()
+            self._on_start()
+        else:
+            self._lbl_status.setText(f"Selected {cam_desc}")
+
+    @Slot()
+    def _on_refresh_cameras_clicked(self) -> None:
+        """Rescan available video capture devices."""
+        log.info("User requested camera list refresh.")
+        self._lbl_status.setText("Scanning cameras…")
+        self._populate_cameras()
+        self._lbl_status.setText("Camera list updated.")
     # ------------------------------------------------------------------
 
     @Slot()

@@ -68,6 +68,7 @@ class TestSettingsLoad:
     def test_missing_defaults_does_not_raise(self, tmp_path):
         s = Settings.load(
             defaults_path=tmp_path / "nonexistent.json",
+            user_path=tmp_path / "nonexistent_user.json",
         )
         # Falls back to dataclass defaults.
         assert s.camera.device_index == 1
