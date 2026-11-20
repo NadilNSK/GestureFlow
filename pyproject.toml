@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gestureflow"
+version = "0.1.0"
+description = "GestureFlow — AI Virtual Mouse for Windows"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "GestureFlow Contributors" }
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "ui: marks tests that require a display / Qt",
+    "integration: marks tests that require real hardware (camera, etc.)",
+]
+
+[tool.coverage.run]
+source = ["src/gestureflow"]
+omit = ["tests/*", "scripts/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

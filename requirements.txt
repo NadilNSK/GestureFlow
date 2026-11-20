@@ -1,0 +1,27 @@
+# GestureFlow — AI Virtual Mouse
+# Tested with Python 3.14 on Windows 11
+#
+# NOTE: mediapipe>=1.0 ships its own opencv-contrib-python; do NOT also
+# install opencv-python or you will get DLL conflicts on Windows.
+
+# Computer Vision & ML (mediapipe pulls opencv-contrib-python automatically)
+mediapipe==1.2.3
+numpy>=1.26,<3
+
+# GUI
+PySide6==6.12.0
+
+# Mouse / Keyboard control
+pyautogui==0.9.54
+
+# Utilities
+Pillow>=10.0
+psutil==6.1.0
+
+# Testing
+pytest==8.3.3
+pytest-qt==4.4.0
+pytest-mock==3.14.0
+
+# Packaging (optional, for building the .exe)
+pyinstaller==6.22.3
