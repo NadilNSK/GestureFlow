@@ -89,30 +89,39 @@ class HandLandmarkerWrapper:
         self._settings = settings
         self._model_path = model_path
         self._landmarker: _HandLandmarker | None = None
+        self._running_mode: _RunningMode = _RunningMode.VIDEO
+        self._last_timestamp_ms: int = -1
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def open(self) -> None:
-        """Load the model and create the HandLandmarker (IMAGE mode)."""
+    def open(self, running_mode: _RunningMode | None = None) -> None:
+        """Load the model and create the HandLandmarker (VIDEO mode by default)."""
         if not self._model_path.exists():
             raise FileNotFoundError(
                 f"Hand Landmarker model not found: {self._model_path}\n"
                 "Run  scripts\\download_model.py  to fetch it."
             )
 
+        if running_mode is not None:
+            self._running_mode = running_mode
+        else:
+            self._running_mode = _RunningMode.VIDEO
+
+        self._last_timestamp_ms = -1
+
         base_options = _BaseOptions(model_asset_path=str(self._model_path))
         options = _HandLandmarkerOptions(
             base_options=base_options,
-            running_mode=_RunningMode.IMAGE,
+            running_mode=self._running_mode,
             num_hands=self._settings.num_hands,
             min_hand_detection_confidence=self._settings.min_detection_confidence,
             min_hand_presence_confidence=self._settings.min_presence_confidence,
             min_tracking_confidence=self._settings.min_tracking_confidence,
         )
         self._landmarker = _HandLandmarker.create_from_options(options)
-        log.info("HandLandmarker loaded from %s", self._model_path)
+        log.info("HandLandmarker loaded from %s (mode=%s)", self._model_path, self._running_mode.name)
 
     def close(self) -> None:
         """Release the HandLandmarker resources."""
@@ -125,6 +134,7 @@ class HandLandmarkerWrapper:
                 self._landmarker = None
             log.info("HandLandmarker closed.")
             time.sleep(0.05)
+        self._last_timestamp_ms = -1
 
     def __enter__(self) -> "HandLandmarkerWrapper":
         self.open()
@@ -161,7 +171,14 @@ class HandLandmarkerWrapper:
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
         try:
-            detection = self._landmarker.detect(mp_image)
+            if self._running_mode == _RunningMode.VIDEO:
+                ts = int(timestamp_ms)
+                if ts <= self._last_timestamp_ms:
+                    ts = self._last_timestamp_ms + 1
+                self._last_timestamp_ms = ts
+                detection = self._landmarker.detect_for_video(mp_image, ts)
+            else:
+                detection = self._landmarker.detect(mp_image)
         except RuntimeError as exc:
             if "cannot schedule new futures after shutdown" in str(exc) or "shutdown" in str(exc):
                 log.debug("MediaPipe executor shut down — returning empty result.")

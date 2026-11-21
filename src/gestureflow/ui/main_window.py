@@ -575,6 +575,8 @@ class MainWindow(QMainWindow):
         coords = getattr(pipeline_frame, "cursor_coords", None)
         prof_name = getattr(self._settings.controller, "cursor_profile", "Balanced")
         quality = getattr(pipeline_frame, "tracking_quality", "LOST")
+        t_state = getattr(pipeline_frame, "tracking_state", "")
+        det_ratio = getattr(pipeline_frame, "detection_ratio", 1.0)
 
         # Update hidden labels for tests
         self._lbl_gesture.setText(g_name.upper())
@@ -594,6 +596,8 @@ class MainWindow(QMainWindow):
             cursor_coords=coords,
             mouse_state=m_state,
             tracking_quality=quality,
+            tracking_state=t_state,
+            detection_ratio=det_ratio,
         )
 
         # 5. Update Live Tracking Page Inspector

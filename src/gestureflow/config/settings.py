@@ -37,7 +37,7 @@ class CameraSettings:
 @dataclass
 class TrackingSettings:
     num_hands: int = 2
-    min_detection_confidence: float = 0.7
+    min_detection_confidence: float = 0.6
     min_presence_confidence: float = 0.5
     min_tracking_confidence: float = 0.5
     model_path: str = "assets/models/hand_landmarker.task"

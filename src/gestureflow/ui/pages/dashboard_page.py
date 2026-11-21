@@ -251,7 +251,7 @@ class DashboardPage(QWidget):
         self._preview_label = QLabel()
         self._preview_label.setObjectName("preview_label")
         self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview_label.setMinimumSize(480, 360)
+        self._preview_label.setMinimumSize(640, 480)
         self._preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._preview_label.setStyleSheet("""
             QLabel#preview_label {
@@ -267,7 +267,7 @@ class DashboardPage(QWidget):
         self._preview_label.setTextFormat(Qt.TextFormat.RichText)
         preview_layout.addWidget(self._preview_label)
 
-        content_layout.addWidget(preview_box, stretch=3)
+        content_layout.addWidget(preview_box, stretch=4)
 
         # Right: Activity Log & Quick Telemetry
         right_box = QFrame()
@@ -292,8 +292,8 @@ class DashboardPage(QWidget):
         self._log_view.setStyleSheet(f"""
             QTextEdit {{
                 background-color: #070B12;
-                color: {TEXT_SECONDARY};
-                font-family: Consolas, 'Courier New', monospace;
+                color: {TEXT_PRIMARY};
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
                 font-size: 11px;
                 border: 1px solid {BORDER_COLOR};
                 border-radius: 6px;
@@ -307,7 +307,7 @@ class DashboardPage(QWidget):
         self._lbl_cursor_coords.setStyleSheet(f"color: {ACCENT_CYAN}; font-size: 11px; font-weight: 600;")
         right_layout.addWidget(self._lbl_cursor_coords)
 
-        content_layout.addWidget(right_box, stretch=2)
+        content_layout.addWidget(right_box, stretch=1)
         layout.addLayout(content_layout)
 
         scroll.setWidget(container)
@@ -318,17 +318,20 @@ class DashboardPage(QWidget):
         page_layout.addWidget(scroll)
 
     def log_activity(self, message: str, level: str = "info") -> None:
-        """Append an in-memory activity log event with timestamp."""
+        """Append an in-memory activity log event with timestamp and category badge."""
         ts = datetime.datetime.now().strftime("%H:%M:%S")
-        color = {
-            "info": TEXT_SECONDARY,
-            "success": ACCENT_EMERALD,
-            "warning": WARNING_AMBER,
-            "danger": DANGER_RED,
-            "cyan": ACCENT_CYAN,
-        }.get(level, TEXT_SECONDARY)
+        badge_config = {
+            "info": ("INFO", "#60A5FA", "rgba(59, 130, 246, 0.2)"),
+            "success": ("ACTION", ACCENT_EMERALD, "rgba(52, 211, 153, 0.2)"),
+            "warning": ("WARN", WARNING_AMBER, "rgba(245, 158, 11, 0.2)"),
+            "danger": ("SAFETY", DANGER_RED, "rgba(239, 68, 68, 0.25)"),
+            "cyan": ("SYSTEM", ACCENT_CYAN, "rgba(6, 182, 212, 0.2)"),
+        }
+        tag, fg, bg = badge_config.get(level, ("INFO", TEXT_SECONDARY, "rgba(107, 114, 128, 0.2)"))
 
-        html = f'<span style="color:{TEXT_MUTED}">[{ts}]</span> <span style="color:{color}">{message}</span>'
+        badge_html = f'<span style="background-color:{bg}; color:{fg}; padding:2px 5px; border-radius:3px; font-weight:700; font-size:9px;">[{tag}]</span>'
+        msg_color = fg if level in ("danger", "warning", "success") else "#E2E8F0"
+        html = f'<div style="margin-bottom:4px; line-height:1.3;"><span style="color:{TEXT_MUTED}; font-size:10px;">{ts}</span> {badge_html} <span style="color:{msg_color}; font-size:11px;">{message}</span></div>'
         self._activity_log.append(html)
         self._log_view.append(html)
         sb = self._log_view.verticalScrollBar()
@@ -345,6 +348,8 @@ class DashboardPage(QWidget):
         cursor_coords: Optional[tuple[int, int]],
         mouse_state: str,
         tracking_quality: str,
+        tracking_state: str = "",
+        detection_ratio: float = 1.0,
     ) -> None:
         """Update dashboard status cards and telemetry pills."""
         self._card_cam_fps.set_value(f"{camera_fps:.1f}", ACCENT_CYAN)
@@ -368,11 +373,22 @@ class DashboardPage(QWidget):
             self._pill_mouse.setText("MOUSE: DISABLED")
             self._pill_mouse.setStyleSheet(self._pill_style("idle"))
 
-        if tracking_quality in ("EXCELLENT", "GOOD"):
+        if tracking_state:
+            if tracking_state == "HAND DETECTED":
+                ratio_str = f" ({detection_ratio * 100:.0f}%)" if detection_ratio > 0 else ""
+                self._pill_tracking.setText(f"TRACK: ACTIVE{ratio_str}")
+                self._pill_tracking.setStyleSheet(self._pill_style("active"))
+            elif tracking_state in ("TRACKING UNSTABLE", "REACQUIRING"):
+                self._pill_tracking.setText(f"TRACK: {tracking_state}")
+                self._pill_tracking.setStyleSheet(self._pill_style("warning"))
+            else:
+                self._pill_tracking.setText("TRACK: LOST")
+                self._pill_tracking.setStyleSheet(self._pill_style("idle"))
+        elif tracking_quality in ("EXCELLENT", "GOOD"):
             self._pill_tracking.setText(f"TRACK: {tracking_quality}")
             self._pill_tracking.setStyleSheet(self._pill_style("active"))
-        elif tracking_quality == "DEGRADED":
-            self._pill_tracking.setText("TRACK: DEGRADED")
+        elif tracking_quality in ("DEGRADED", "UNSTABLE", "REACQUIRING"):
+            self._pill_tracking.setText(f"TRACK: {tracking_quality}")
             self._pill_tracking.setStyleSheet(self._pill_style("warning"))
         else:
             self._pill_tracking.setText("TRACK: LOST")

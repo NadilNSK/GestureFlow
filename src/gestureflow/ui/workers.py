@@ -8,6 +8,7 @@ processed frames as Qt signals so the UI thread can update widgets safely.
 from __future__ import annotations
 
 import logging
+import threading
 import traceback
 
 import numpy as np
@@ -44,6 +45,10 @@ class PipelineWorker(QObject):
         self._camera = CameraCapture(settings.camera)
         self._pipeline: TrackingPipeline | None = None
         self._running = False
+        self._frame_lock = threading.Lock()
+        self._new_frame_event = threading.Event()
+        self._latest_camera_frame: CameraFrame | None = None
+        self._process_thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------
     # Slots (called from the owning QThread)
@@ -68,6 +73,16 @@ class PipelineWorker(QObject):
             return
 
         self._running = True
+        self._new_frame_event.clear()
+        self._latest_camera_frame = None
+
+        self._process_thread = threading.Thread(
+            target=self._processing_loop,
+            name="PipelineProcessingThread",
+            daemon=True,
+        )
+        self._process_thread.start()
+
         self.status_changed.emit("Camera starting…")
         self._camera.start(on_frame=self._on_frame, on_error=self._on_camera_error)
         self.status_changed.emit("Running")
@@ -179,6 +194,10 @@ class PipelineWorker(QObject):
         """Stop the camera and release model resources. Called in the worker thread."""
         log.info("PipelineWorker: stopping pipeline…")
         self._running = False
+        self._new_frame_event.set()
+        if self._process_thread and self._process_thread.is_alive():
+            self._process_thread.join(timeout=2.0)
+            self._process_thread = None
         if self._pipeline:
             self._pipeline.mouse_controller.disable()
         self._camera.stop()
@@ -189,36 +208,54 @@ class PipelineWorker(QObject):
         log.info("PipelineWorker: pipeline stopped.")
 
     # ------------------------------------------------------------------
-    # Internal callbacks
+    # Internal callbacks & processing loop
     # ------------------------------------------------------------------
 
     def _on_frame(self, camera_frame: CameraFrame) -> None:
-        """Called by CameraCapture on its capture thread."""
-        if not self._running or self._pipeline is None:
+        """Called by CameraCapture on its capture thread at hardware rate."""
+        if not self._running:
             return
-        try:
-            pipeline_frame = self._pipeline.process(camera_frame)
-            self.frame_ready.emit(pipeline_frame)
-        except Exception as exc:
-            # Check for PyAutoGUI FailSafeException
-            is_failsafe = False
-            try:
-                import pyautogui
-                failsafe_cls = getattr(pyautogui, "FailSafeException", None)
-                if failsafe_cls is not None and isinstance(exc, failsafe_cls):
-                    is_failsafe = True
-            except ImportError:
-                pass
+        with self._frame_lock:
+            self._latest_camera_frame = camera_frame
+        self._new_frame_event.set()
 
-            if is_failsafe:
-                msg = "FAILSAFE TRIGGERED: Mouse moved to screen corner! Emergency stop activated."
-                log.critical(msg)
-                self.error_occurred.emit(msg)
-                self.status_changed.emit("EMERGENCY STOP")
-            elif "cannot schedule new futures after shutdown" in str(exc) or not self._running:
-                log.debug("Frame processing ignored during shutdown.")
-            else:
-                log.error("Pipeline processing error: %s\n%s", exc, traceback.format_exc())
+    def _processing_loop(self) -> None:
+        """Dedicated processing loop decoupled from camera capture."""
+        log.info("Pipeline processing loop started.")
+        while self._running:
+            if not self._new_frame_event.wait(timeout=0.05):
+                continue
+            self._new_frame_event.clear()
+            with self._frame_lock:
+                frame = self._latest_camera_frame
+                self._latest_camera_frame = None
+
+            if frame is None or not self._running or self._pipeline is None:
+                continue
+
+            try:
+                pipeline_frame = self._pipeline.process(frame)
+                self.frame_ready.emit(pipeline_frame)
+            except Exception as exc:
+                # Check for PyAutoGUI FailSafeException
+                is_failsafe = False
+                try:
+                    import pyautogui
+                    failsafe_cls = getattr(pyautogui, "FailSafeException", None)
+                    if failsafe_cls is not None and isinstance(exc, failsafe_cls):
+                        is_failsafe = True
+                except ImportError:
+                    pass
+
+                if is_failsafe:
+                    msg = "FAILSAFE TRIGGERED: Mouse moved to screen corner! Emergency stop activated."
+                    log.critical(msg)
+                    self.error_occurred.emit(msg)
+                    self.status_changed.emit("EMERGENCY STOP")
+                elif "cannot schedule new futures after shutdown" in str(exc) or not self._running:
+                    log.debug("Frame processing ignored during shutdown.")
+                else:
+                    log.error("Pipeline processing error: %s\n%s", exc, traceback.format_exc())
 
     def _on_camera_error(self, exc: Exception) -> None:
         """Called by CameraCapture when an unrecoverable error occurs."""

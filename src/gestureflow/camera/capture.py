@@ -381,6 +381,13 @@ class CameraCapture:
                 "and not in use by another application (e.g. Teams, Zoom, or browser)."
             )
 
+        # Optimize USB throughput on Windows DirectShow by requesting MJPG
+        if backend_name in ("DSHOW", "CAP_DSHOW"):
+            try:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            except Exception as e:
+                log.debug("Setting VideoWriter_fourcc MJPG failed: %s", e)
+
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._settings.frame_width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._settings.frame_height)
         cap.set(cv2.CAP_PROP_FPS, self._settings.fps)

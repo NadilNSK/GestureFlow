@@ -85,6 +85,14 @@ class PipelineFrame:
     cursor_profile: str = "Balanced"
     click_strategy: str = "deferred"
 
+    # Phase 4.1 Stability & Diagnostic Telemetry
+    tracking_state: str = "HAND LOST"
+    detection_ratio: float = 1.0
+    mediapipe_no_hands_count: int = 0
+    continuity_rejected_count: int = 0
+    tracking_lost_count: int = 0
+    reacquired_count: int = 0
+
 
 class TrackingPipeline:
     """
@@ -97,6 +105,8 @@ class TrackingPipeline:
     """
 
     def __init__(self, settings: Settings) -> None:
+        import collections
+
         self._settings = settings
         self._landmarker = HandLandmarkerWrapper(
             settings=settings.tracking,
@@ -110,10 +120,50 @@ class TrackingPipeline:
         self._prev_active_wrist: Optional[tuple[float, float]] = None
         self._fps_times: list[float] = []
 
+        # Phase 4.1 State Machine & Diagnostic Telemetry
+        self._tracking_state: str = "HAND LOST"
+        self._consecutive_lost_frames: int = 0
+        self._mediapipe_no_hands_count: int = 0
+        self._continuity_rejected_count: int = 0
+        self._tracking_lost_count: int = 0
+        self._reacquired_count: int = 0
+        self._detection_history: collections.deque[bool] = collections.deque(maxlen=30)
+
     @property
     def mouse_controller(self) -> MouseController:
         """Access the pipeline's virtual mouse controller."""
         return self._mouse_controller
+
+    @property
+    def tracking_state(self) -> str:
+        """Current hand tracking state machine status."""
+        return self._tracking_state
+
+    @property
+    def mediapipe_no_hands_count(self) -> int:
+        return self._mediapipe_no_hands_count
+
+    @property
+    def continuity_rejected_count(self) -> int:
+        return self._continuity_rejected_count
+
+    @property
+    def tracking_lost_count(self) -> int:
+        return self._tracking_lost_count
+
+    @property
+    def reacquired_count(self) -> int:
+        return self._reacquired_count
+
+    @property
+    def consecutive_lost_frames(self) -> int:
+        return self._consecutive_lost_frames
+
+    @property
+    def detection_ratio(self) -> float:
+        if not self._detection_history:
+            return 0.0
+        return sum(self._detection_history) / len(self._detection_history)
 
     def open(self) -> None:
         """Load the MediaPipe model and reset classifier and mouse state."""
@@ -122,6 +172,13 @@ class TrackingPipeline:
         self._mouse_controller.reset_smoothing()
         self._prev_active_wrist = None
         self._fps_times.clear()
+        self._tracking_state = "HAND LOST"
+        self._consecutive_lost_frames = 0
+        self._mediapipe_no_hands_count = 0
+        self._continuity_rejected_count = 0
+        self._tracking_lost_count = 0
+        self._reacquired_count = 0
+        self._detection_history.clear()
 
     def close(self) -> None:
         """Release the MediaPipe model and disable mouse control."""
@@ -130,6 +187,9 @@ class TrackingPipeline:
         self._mouse_controller.disable()
         self._prev_active_wrist = None
         self._fps_times.clear()
+        self._tracking_state = "HAND LOST"
+        self._consecutive_lost_frames = 0
+        self._detection_history.clear()
 
     def __enter__(self) -> "TrackingPipeline":
         self.open()
@@ -164,6 +224,12 @@ class TrackingPipeline:
         t_infer_start = time.perf_counter()
         tracking = self._landmarker.detect(bgr, camera_frame.timestamp_ms)
         inference_time_ms = (time.perf_counter() - t_infer_start) * 1000.0
+
+        if not tracking.has_hands:
+            self._mediapipe_no_hands_count += 1
+            self._detection_history.append(False)
+        else:
+            self._detection_history.append(True)
 
         # 2. Hand selection (up to 2 hands) with spatial continuity
         t_gest_start = time.perf_counter()
@@ -211,7 +277,12 @@ class TrackingPipeline:
 
         # Tracking quality determination
         if not active_hand or not tracking.has_hands:
-            tracking_quality = "LOST"
+            if self._tracking_state == "TRACKING UNSTABLE":
+                tracking_quality = "UNSTABLE"
+            elif self._tracking_state == "REACQUIRING":
+                tracking_quality = "REACQUIRING"
+            else:
+                tracking_quality = "LOST"
         elif active_hand.score >= 0.85:
             tracking_quality = "EXCELLENT"
         elif active_hand.score >= 0.65:
@@ -227,7 +298,7 @@ class TrackingPipeline:
             bgr = self._draw_hands(bgr, tracking.hands, active_hand, gesture_result, cursor_coords)
 
         if self._settings.ui.show_gesture_label:
-            bgr = self._draw_hud(bgr, gesture_result, active_hand, len(tracking.hands), mouse_state, cursor_coords)
+            bgr = self._draw_hud(bgr, gesture_result, active_hand, len(tracking.hands), mouse_state, cursor_coords, tracking_quality)
 
         if self._settings.ui.show_fps:
             self._draw_fps(bgr, camera_frame.fps)
@@ -260,6 +331,12 @@ class TrackingPipeline:
             tracking_quality=tracking_quality,
             cursor_profile=self._mouse_controller.cursor_profile,
             click_strategy=self._mouse_controller.click_strategy,
+            tracking_state=self._tracking_state,
+            detection_ratio=self.detection_ratio,
+            mediapipe_no_hands_count=self._mediapipe_no_hands_count,
+            continuity_rejected_count=self._continuity_rejected_count,
+            tracking_lost_count=self._tracking_lost_count,
+            reacquired_count=self._reacquired_count,
         )
 
     # ------------------------------------------------------------------
@@ -274,10 +351,25 @@ class TrackingPipeline:
         preferred handedness ("Right" by default), and detection score.
         """
         if not hands:
-            self._prev_active_wrist = None
-            if self._mouse_controller.is_dragging:
-                self._mouse_controller.release_held_buttons()
+            self._consecutive_lost_frames += 1
+            if self._consecutive_lost_frames == 1:
+                self._tracking_state = "TRACKING UNSTABLE"
+            elif self._consecutive_lost_frames == 2:
+                self._tracking_state = "REACQUIRING"
+            else:
+                if self._tracking_state != "HAND LOST":
+                    self._tracking_lost_count += 1
+                self._tracking_state = "HAND LOST"
+                self._prev_active_wrist = None
+                if self._mouse_controller.is_dragging:
+                    self._mouse_controller.release_held_buttons()
             return None
+
+        # When hands are detected:
+        if self._consecutive_lost_frames > 0:
+            self._reacquired_count += 1
+            self._consecutive_lost_frames = 0
+        self._tracking_state = "HAND DETECTED"
 
         def _get_wrist_xy(hand: HandLandmarks) -> Optional[tuple[float, float]]:
             if hand.landmarks is None or len(hand.landmarks) == 0:
@@ -306,9 +398,11 @@ class TrackingPipeline:
                 return (w[0] - px) ** 2 + (w[1] - py) ** 2
 
             closest_hand = min(hands, key=_dist_sq)
-            if _dist_sq(closest_hand) < 0.09:  # within ~30% normalized distance
+            if _dist_sq(closest_hand) < 0.125:  # within ~35% normalized distance
                 self._prev_active_wrist = _get_wrist_xy(closest_hand)
                 return closest_hand
+            else:
+                self._continuity_rejected_count += 1
 
         # Otherwise check if one matches user preference
         pref_matches = [h for h in hands if h.handedness.lower() == pref]
@@ -466,6 +560,7 @@ class TrackingPipeline:
         num_hands: int,
         mouse_state: str = "DISABLED",
         cursor_coords: Optional[tuple[int, int]] = None,
+        tracking_quality: str = "EXCELLENT",
     ) -> np.ndarray:
         """Render upper-left HUD card with gesture, finger states, hand status, and mouse telemetry."""
         h, w = bgr.shape[:2]
@@ -499,8 +594,14 @@ class TrackingPipeline:
 
         # 2. Hand tracking status
         if active_hand:
-            hand_str = f"Hand: {active_hand.handedness} ({num_hands} in view)"
-            h_col = (220, 220, 220)
+            hand_str = f"Hand: {active_hand.handedness} ({num_hands} in view) • {tracking_quality}"
+            h_col = (0, 255, 180) if tracking_quality in ("EXCELLENT", "GOOD") else (0, 220, 255)
+        elif self._tracking_state == "TRACKING UNSTABLE":
+            hand_str = "Hand: TRACKING UNSTABLE (1/2)"
+            h_col = (0, 200, 255)
+        elif self._tracking_state == "REACQUIRING":
+            hand_str = "Hand: REACQUIRING (2/2)"
+            h_col = (0, 165, 255)
         else:
             hand_str = "Hand: Searching..."
             h_col = (130, 130, 130)
