@@ -150,8 +150,12 @@ class UiSettings:
     preview_height: int = 480
     theme: str = "dark"
     show_landmarks: bool = True
+    show_skeleton: bool = True
     show_fps: bool = True
     show_gesture_label: bool = True
+    onboarding_completed: bool = False
+    sidebar_collapsed: bool = False
+    animations_enabled: bool = True
 
 
 @dataclass

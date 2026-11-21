@@ -68,8 +68,12 @@
     "preview_height": 480,
     "theme": "dark",
     "show_landmarks": true,
+    "show_skeleton": true,
     "show_fps": true,
-    "show_gesture_label": true
+    "show_gesture_label": true,
+    "onboarding_completed": false,
+    "sidebar_collapsed": false,
+    "animations_enabled": true
   },
   "logging": {
     "level": "INFO",
