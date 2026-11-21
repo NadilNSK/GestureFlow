@@ -72,7 +72,12 @@ def discover_available_cameras(
         List of probed devices with status and descriptions.
     """
     b_upper = (backend or "DSHOW").upper()
-    backend_flag = cv2.CAP_DSHOW if b_upper in ("DSHOW", "CAP_DSHOW") else cv2.CAP_ANY
+    if b_upper in ("DSHOW", "CAP_DSHOW"):
+        backend_flag = cv2.CAP_DSHOW
+    elif b_upper in ("MSMF", "CAP_MSMF"):
+        backend_flag = cv2.CAP_MSMF
+    else:
+        backend_flag = cv2.CAP_ANY
 
     discovered: list[DiscoveredCamera] = []
 
@@ -381,16 +386,17 @@ class CameraCapture:
                 "and not in use by another application (e.g. Teams, Zoom, or browser)."
             )
 
-        # Optimize USB throughput on Windows DirectShow by requesting MJPG
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._settings.frame_width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._settings.frame_height)
+        cap.set(cv2.CAP_PROP_FPS, self._settings.fps)
+
+        # Optimize USB throughput on Windows DirectShow by requesting MJPG after setting dimensions
         if backend_name in ("DSHOW", "CAP_DSHOW"):
             try:
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             except Exception as e:
                 log.debug("Setting VideoWriter_fourcc MJPG failed: %s", e)
 
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._settings.frame_width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._settings.frame_height)
-        cap.set(cv2.CAP_PROP_FPS, self._settings.fps)
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
