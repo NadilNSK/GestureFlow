@@ -164,6 +164,17 @@ class PipelineWorker(QObject):
         if self._pipeline:
             self._pipeline.mouse_controller.settings.scroll_sensitivity = max(0.1, min(10.0, float(val)))
 
+    def set_click_strategy(self, strategy: str) -> None:
+        """Update mouse click strategy ('deferred' or 'native')."""
+        if self._pipeline:
+            self._pipeline.mouse_controller.set_click_strategy(strategy)
+
+    def set_cursor_profile(self, profile_name: str) -> bool:
+        """Apply a cursor response profile."""
+        if self._pipeline:
+            return self._pipeline.mouse_controller.set_cursor_profile(profile_name)
+        return False
+
     def stop_pipeline(self) -> None:
         """Stop the camera and release model resources. Called in the worker thread."""
         log.info("PipelineWorker: stopping pipeline…")

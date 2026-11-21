@@ -109,6 +109,13 @@ class MainWindow(QMainWindow):
         self._log_handler: _QtLogHandler | None = None
         self._calibration_dialog: CalibrationDialog | None = None
 
+        # Phase 3 Performance EMA smoothers
+        self._ema_pipeline_latency = 0.0
+        self._ema_infer = 0.0
+        self._ema_gest = 0.0
+        self._ema_ctrl = 0.0
+        self._ema_age = 0.0
+
         self._build_ui()
         self._apply_dark_theme()
         log.info("MainWindow initialised.")
@@ -200,6 +207,44 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self._btn_calibrate)
         toolbar.addSeparator()
 
+        lbl_prof = QLabel(" Profile: ")
+        lbl_prof.setStyleSheet("font-weight: bold; color: #ccc; font-size: 11px;")
+        toolbar.addWidget(lbl_prof)
+
+        self._combo_profile = QComboBox()
+        self._combo_profile.setObjectName("combo_profile")
+        self._combo_profile.setFixedHeight(30)
+        self._combo_profile.setStyleSheet(
+            "QComboBox { background: #262626; color: #fff; padding: 2px 8px; border: 1px solid #444; border-radius: 4px; font-size: 11px; }"
+            "QComboBox::drop-down { border: none; }"
+            "QComboBox QAbstractItemView { background: #1f1f1f; color: #fff; selection-background-color: #2e7d32; }"
+        )
+        self._combo_profile.addItems(["Balanced", "Precision", "Responsive", "Custom"])
+        cur_prof = getattr(self._settings.controller, "cursor_profile", "Balanced")
+        prof_items = ["Balanced", "Precision", "Responsive", "Custom"]
+        self._combo_profile.setCurrentIndex(prof_items.index(cur_prof) if cur_prof in prof_items else 0)
+        self._combo_profile.currentIndexChanged.connect(self._on_profile_combo_changed)
+        toolbar.addWidget(self._combo_profile)
+
+        lbl_strat = QLabel(" Click: ")
+        lbl_strat.setStyleSheet("font-weight: bold; color: #ccc; font-size: 11px;")
+        toolbar.addWidget(lbl_strat)
+
+        self._combo_click_strategy = QComboBox()
+        self._combo_click_strategy.setObjectName("combo_click_strategy")
+        self._combo_click_strategy.setFixedHeight(30)
+        self._combo_click_strategy.setStyleSheet(
+            "QComboBox { background: #262626; color: #fff; padding: 2px 8px; border: 1px solid #444; border-radius: 4px; font-size: 11px; }"
+            "QComboBox::drop-down { border: none; }"
+            "QComboBox QAbstractItemView { background: #1f1f1f; color: #fff; selection-background-color: #2e7d32; }"
+        )
+        self._combo_click_strategy.addItems(["Safe Deferred", "Responsive Native"])
+        cur_strat = getattr(self._settings.controller, "click_strategy", "deferred")
+        self._combo_click_strategy.setCurrentIndex(1 if cur_strat == "native" else 0)
+        self._combo_click_strategy.currentIndexChanged.connect(self._on_click_strategy_changed)
+        toolbar.addWidget(self._combo_click_strategy)
+        toolbar.addSeparator()
+
         self._btn_emergency_stop = QPushButton("🛑 EMERGENCY STOP (Esc)")
         self._btn_emergency_stop.setObjectName("btn_emergency_stop")
         self._btn_emergency_stop.setFixedHeight(32)
@@ -256,8 +301,8 @@ class MainWindow(QMainWindow):
         side_layout.setContentsMargins(0, 0, 0, 0)
         side_layout.setSpacing(8)
 
-        # 1. Recognized Gesture Card
-        gesture_group = QGroupBox("Gesture Recognition")
+        # 1. Recognized Gesture Card (Gesture Intelligence)
+        gesture_group = QGroupBox("Gesture Intelligence")
         gesture_layout = QVBoxLayout(gesture_group)
         gesture_layout.setSpacing(4)
 
@@ -269,10 +314,12 @@ class MainWindow(QMainWindow):
         )
         gesture_layout.addWidget(self._lbl_gesture)
 
-        self._lbl_gesture_conf = QLabel("Confidence: —")
+        self._lbl_gesture_conf = QLabel("Confidence: — (Heuristic)")
         self._lbl_gesture_status = QLabel("Status: Idle")
-        gesture_layout.addWidget(self._lbl_gesture_conf)
-        gesture_layout.addWidget(self._lbl_gesture_status)
+        self._lbl_pinch_ratio = QLabel("Pinch Distance: —")
+        self._lbl_tracking_quality = QLabel("Tracking Quality: —")
+        for lbl in (self._lbl_gesture_conf, self._lbl_gesture_status, self._lbl_pinch_ratio, self._lbl_tracking_quality):
+            gesture_layout.addWidget(lbl)
         side_layout.addWidget(gesture_group)
 
         # 2. Hand Tracking Card
@@ -500,10 +547,17 @@ class MainWindow(QMainWindow):
 
         side_layout.addWidget(actions_group)
 
-        # 6. Device Info Card
-        stats_group = QGroupBox("Device & System")
+        # 6. Performance & System Monitor Card
+        stats_group = QGroupBox("Performance & System Monitor")
         stats_layout = QVBoxLayout(stats_group)
         stats_layout.setSpacing(3)
+
+        self._lbl_perf_fps = QLabel("Cam: — FPS | Proc: — FPS")
+        self._lbl_perf_latencies = QLabel("Infer: — ms | Gest: — ms | Ctrl: — ms")
+        self._lbl_perf_total = QLabel("Pipeline Latency: — ms | Age: — ms")
+        self._lbl_perf_note = QLabel("* Software latency (excludes sensor exposure)")
+        self._lbl_perf_note.setStyleSheet("color: #777; font-size: 9px; font-style: italic;")
+
         cam_desc = (
             "Mock Camera"
             if self._settings.camera.use_mock_camera
@@ -514,7 +568,15 @@ class MainWindow(QMainWindow):
         self._lbl_resolution = QLabel(
             f"Resolution: {self._settings.camera.frame_width}×{self._settings.camera.frame_height}"
         )
-        for lbl in (self._lbl_device_cam, self._lbl_model, self._lbl_resolution):
+        for lbl in (
+            self._lbl_perf_fps,
+            self._lbl_perf_latencies,
+            self._lbl_perf_total,
+            self._lbl_perf_note,
+            self._lbl_device_cam,
+            self._lbl_model,
+            self._lbl_resolution,
+        ):
             lbl.setWordWrap(True)
             stats_layout.addWidget(lbl)
         side_layout.addWidget(stats_group)
@@ -910,9 +972,12 @@ class MainWindow(QMainWindow):
         if g_res and active_hand:
             g_name = g_res.label.upper()
             self._lbl_gesture.setText(g_name)
-            self._lbl_gesture_conf.setText(f"Confidence: {g_res.confidence * 100:.0f}%")
+            self._lbl_gesture_conf.setText(f"Confidence: {g_res.confidence * 100:.0f}% (Heuristic)")
             status_text = "Stable (Confirmed)" if g_res.is_stable else "Confirming..."
             self._lbl_gesture_status.setText(f"Status: {status_text}")
+            if hasattr(self, "_lbl_pinch_ratio"):
+                th_act = getattr(self._settings.gestures, "pinch_activation_threshold", 0.065)
+                self._lbl_pinch_ratio.setText(f"Pinch Ratio: {g_res.pinch_distance:.3f} (Act: {th_act:.3f})")
 
             # Dynamic badge styling
             g_style = self._get_gesture_badge_style(g_res.gesture)
@@ -923,8 +988,15 @@ class MainWindow(QMainWindow):
                 "background: #222; color: #888; font-weight: bold; font-size: 15px; "
                 "padding: 8px; border-radius: 4px; border: 1px solid #333;"
             )
-            self._lbl_gesture_conf.setText("Confidence: —")
+            self._lbl_gesture_conf.setText("Confidence: — (Heuristic)")
             self._lbl_gesture_status.setText("Status: Searching...")
+            if hasattr(self, "_lbl_pinch_ratio"):
+                self._lbl_pinch_ratio.setText("Pinch Ratio: —")
+
+        if hasattr(self, "_lbl_tracking_quality"):
+            q = getattr(pipeline_frame, "tracking_quality", "LOST")
+            q_col = "#00e676" if q == "EXCELLENT" else ("#ffeb3b" if q == "GOOD" else ("#ff9800" if q == "DEGRADED" else "#f44336"))
+            self._lbl_tracking_quality.setText(f"Quality: <span style='color:{q_col}; font-weight:bold;'>{q}</span>")
 
         # 4. Update Finger States
         f_states = pipeline_frame.finger_states
@@ -1067,6 +1139,54 @@ class MainWindow(QMainWindow):
             else:
                 self._lbl_scroll_indicator.setText("Scroll: IDLE")
                 self._lbl_scroll_indicator.setStyleSheet("color: #777; font-size: 10px; font-weight: bold;")
+
+        # 7. Update Real-Time Performance Monitor
+        alpha = 0.15
+        self._ema_infer = (1.0 - alpha) * self._ema_infer + alpha * getattr(pipeline_frame, "inference_time_ms", 0.0)
+        self._ema_gest = (1.0 - alpha) * self._ema_gest + alpha * getattr(pipeline_frame, "classification_time_ms", 0.0)
+        self._ema_ctrl = (1.0 - alpha) * self._ema_ctrl + alpha * getattr(pipeline_frame, "controller_time_ms", 0.0)
+        self._ema_pipeline_latency = (1.0 - alpha) * self._ema_pipeline_latency + alpha * getattr(pipeline_frame, "pipeline_latency_ms", 0.0)
+        self._ema_age = (1.0 - alpha) * self._ema_age + alpha * getattr(pipeline_frame, "frame_age_ms", 0.0)
+
+        if hasattr(self, "_lbl_perf_fps"):
+            cam_fps = getattr(pipeline_frame, "camera_fps", pipeline_frame.fps)
+            proc_fps = getattr(pipeline_frame, "processing_fps", pipeline_frame.fps)
+            self._lbl_perf_fps.setText(f"Cam: {cam_fps:.1f} FPS | Proc: {proc_fps:.1f} FPS")
+        if hasattr(self, "_lbl_perf_latencies"):
+            self._lbl_perf_latencies.setText(
+                f"Infer: {self._ema_infer:.1f}ms | Gest: {self._ema_gest:.1f}ms | Ctrl: {self._ema_ctrl:.1f}ms"
+            )
+        if hasattr(self, "_lbl_perf_total"):
+            self._lbl_perf_total.setText(
+                f"Pipeline Latency: ~{self._ema_pipeline_latency:.1f}ms | Age: {self._ema_age:.1f}ms"
+            )
+
+    @Slot(int)
+    def _on_profile_combo_changed(self, index: int) -> None:
+        """Handle profile selection from dropdown."""
+        prof_name = self._combo_profile.currentText()
+        if self._settings.apply_cursor_profile(prof_name):
+            if self._worker:
+                self._worker.set_cursor_profile(prof_name)
+            # Update UI sliders and controls to reflect new profile settings
+            self._slider_sens.setValue(int(self._settings.controller.cursor_sensitivity * 10))
+            self._lbl_sens_val.setText(f"Sensitivity: {self._settings.controller.cursor_sensitivity:.1f}x")
+            self._slider_smooth.setValue(int(self._settings.controller.cursor_smoothing * 100))
+            self._lbl_smooth_val.setText(f"Smoothing: {self._settings.controller.cursor_smoothing:.2f}")
+            self._combo_filter.setCurrentIndex(0 if self._settings.controller.smoothing_filter_type == "one_euro" else 1)
+            self._combo_click_strategy.setCurrentIndex(1 if self._settings.controller.click_strategy == "native" else 0)
+            self._settings.save_user_settings()
+            log.info("Profile switched to: %s", prof_name)
+
+    @Slot(int)
+    def _on_click_strategy_changed(self, index: int) -> None:
+        """Handle click strategy selection from dropdown."""
+        strat = "native" if index == 1 else "deferred"
+        self._settings.controller.click_strategy = strat
+        if self._worker:
+            self._worker.set_click_strategy(strat)
+        self._settings.save_user_settings()
+        log.info("Click strategy switched to: %s", strat)
 
     @Slot(str)
     def _on_pipeline_error(self, message: str) -> None:

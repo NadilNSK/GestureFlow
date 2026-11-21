@@ -73,6 +73,18 @@ class PipelineFrame:
     double_click_count: int = 0
     scroll_direction: str = "IDLE"
 
+    # Phase 3 Telemetry & Performance Instrumentation
+    inference_time_ms: float = 0.0
+    classification_time_ms: float = 0.0
+    controller_time_ms: float = 0.0
+    pipeline_latency_ms: float = 0.0
+    frame_age_ms: float = 0.0
+    processing_fps: float = 0.0
+    camera_fps: float = 0.0
+    tracking_quality: str = "EXCELLENT"
+    cursor_profile: str = "Balanced"
+    click_strategy: str = "deferred"
+
 
 class TrackingPipeline:
     """
@@ -96,6 +108,7 @@ class TrackingPipeline:
             mock_mode=settings.camera.use_mock_camera,
         )
         self._prev_active_wrist: Optional[tuple[float, float]] = None
+        self._fps_times: list[float] = []
 
     @property
     def mouse_controller(self) -> MouseController:
@@ -108,6 +121,7 @@ class TrackingPipeline:
         self._classifier.reset()
         self._mouse_controller.reset_smoothing()
         self._prev_active_wrist = None
+        self._fps_times.clear()
 
     def close(self) -> None:
         """Release the MediaPipe model and disable mouse control."""
@@ -115,6 +129,7 @@ class TrackingPipeline:
         self._classifier.reset()
         self._mouse_controller.disable()
         self._prev_active_wrist = None
+        self._fps_times.clear()
 
     def __enter__(self) -> "TrackingPipeline":
         self.open()
@@ -137,19 +152,30 @@ class TrackingPipeline:
         -------
         PipelineFrame
         """
+        import time
+
+        t_process_start = time.perf_counter()
+        capture_perf = getattr(camera_frame, "capture_perf_time", 0.0)
+        frame_age_ms = (t_process_start - capture_perf) * 1000.0 if capture_perf > 0.0 else 0.0
+
         bgr = camera_frame.image.copy()
 
         # 1. MediaPipe Tasks Hand Landmarker detection
+        t_infer_start = time.perf_counter()
         tracking = self._landmarker.detect(bgr, camera_frame.timestamp_ms)
+        inference_time_ms = (time.perf_counter() - t_infer_start) * 1000.0
 
-        # 2. Hand selection (up to 2 hands)
+        # 2. Hand selection (up to 2 hands) with spatial continuity
+        t_gest_start = time.perf_counter()
         active_hand = self._select_primary_hand(tracking.hands)
 
         # 3. Gesture classification & stabilization
         gesture_result = self._classifier.classify(active_hand)
+        classification_time_ms = (time.perf_counter() - t_gest_start) * 1000.0
         finger_states = gesture_result.finger_states if active_hand else None
 
         # 4. Virtual mouse controller dispatch
+        t_ctrl_start = time.perf_counter()
         cursor_coords: Optional[tuple[int, int]] = None
         mouse_state = self._mouse_controller.state.value
         if self._mouse_controller.is_enabled and not self._settings.camera.use_mock_camera:
@@ -163,6 +189,35 @@ class TrackingPipeline:
                 mouse_state = self._mouse_controller.state.value
                 log.error("Virtual mouse controller processing error: %s", exc)
                 raise
+        controller_time_ms = (time.perf_counter() - t_ctrl_start) * 1000.0
+
+        # Total pipeline latency from camera frame capture to completion
+        pipeline_latency_ms = (
+            (time.perf_counter() - capture_perf) * 1000.0
+            if capture_perf > 0.0
+            else (time.perf_counter() - t_process_start) * 1000.0
+        )
+
+        # Rolling processing FPS
+        now_mono = time.monotonic()
+        self._fps_times.append(now_mono)
+        if len(self._fps_times) > 30:
+            self._fps_times.pop(0)
+        processing_fps = (
+            (len(self._fps_times) - 1) / (self._fps_times[-1] - self._fps_times[0])
+            if len(self._fps_times) > 1
+            else camera_frame.fps
+        )
+
+        # Tracking quality determination
+        if not active_hand or not tracking.has_hands:
+            tracking_quality = "LOST"
+        elif active_hand.score >= 0.85:
+            tracking_quality = "EXCELLENT"
+        elif active_hand.score >= 0.65:
+            tracking_quality = "GOOD"
+        else:
+            tracking_quality = "DEGRADED"
 
         # 5. Draw active tracking region box
         bgr = self._draw_tracking_region(bgr, self._mouse_controller.is_enabled)
@@ -195,6 +250,16 @@ class TrackingPipeline:
             right_click_count=self._mouse_controller.right_click_count,
             double_click_count=self._mouse_controller.double_click_count,
             scroll_direction=self._mouse_controller.scroll_direction,
+            inference_time_ms=inference_time_ms,
+            classification_time_ms=classification_time_ms,
+            controller_time_ms=controller_time_ms,
+            pipeline_latency_ms=pipeline_latency_ms,
+            frame_age_ms=frame_age_ms,
+            processing_fps=processing_fps,
+            camera_fps=camera_frame.fps,
+            tracking_quality=tracking_quality,
+            cursor_profile=self._mouse_controller.cursor_profile,
+            click_strategy=self._mouse_controller.click_strategy,
         )
 
     # ------------------------------------------------------------------
@@ -205,11 +270,13 @@ class TrackingPipeline:
         """
         Consistently select the primary control hand when 1 or 2 hands are visible.
 
-        Prioritises preferred handedness ("Right" by default), then detection
-        score and spatial proximity to the previous active hand.
+        Prioritises spatial continuity with the previously active hand, then
+        preferred handedness ("Right" by default), and detection score.
         """
         if not hands:
             self._prev_active_wrist = None
+            if self._mouse_controller.is_dragging:
+                self._mouse_controller.release_held_buttons()
             return None
 
         def _get_wrist_xy(hand: HandLandmarks) -> Optional[tuple[float, float]]:
@@ -228,24 +295,28 @@ class TrackingPipeline:
         # When 2 hands are detected:
         pref = self._settings.gestures.preferred_handedness.lower()
 
-        # Check if one matches user preference
+        # If we were already tracking a hand, prioritize spatial continuity
+        if self._prev_active_wrist is not None:
+            px, py = self._prev_active_wrist
+
+            def _dist_sq(h: HandLandmarks) -> float:
+                w = _get_wrist_xy(h)
+                if w is None:
+                    return 999.0
+                return (w[0] - px) ** 2 + (w[1] - py) ** 2
+
+            closest_hand = min(hands, key=_dist_sq)
+            if _dist_sq(closest_hand) < 0.09:  # within ~30% normalized distance
+                self._prev_active_wrist = _get_wrist_xy(closest_hand)
+                return closest_hand
+
+        # Otherwise check if one matches user preference
         pref_matches = [h for h in hands if h.handedness.lower() == pref]
         if len(pref_matches) == 1:
             chosen = pref_matches[0]
         else:
-            # If both match or neither matches, pick by spatial proximity if available
-            if self._prev_active_wrist is not None:
-                px, py = self._prev_active_wrist
-                def _dist_sq(h: HandLandmarks) -> float:
-                    w = _get_wrist_xy(h)
-                    if w is None:
-                        return 999.0
-                    return (w[0] - px) ** 2 + (w[1] - py) ** 2
-
-                chosen = min(hands, key=_dist_sq)
-            else:
-                # Fallback to higher detection confidence
-                chosen = max(hands, key=lambda h: h.score)
+            # Fallback to higher detection confidence
+            chosen = max(hands, key=lambda h: h.score)
 
         self._prev_active_wrist = _get_wrist_xy(chosen)
         return chosen

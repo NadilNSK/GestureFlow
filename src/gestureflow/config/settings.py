@@ -51,6 +51,52 @@ class GestureSettings:
     loss_tolerance_frames: int = 3
     preferred_handedness: str = "Right"
 
+    # Phase 3 additions:
+    adaptive_pinch_enabled: bool = True
+    pinch_activation_threshold: float = 0.065
+    pinch_stability_frames: int = 3
+    gesture_history_size: int = 5
+    gesture_stability_frames: int = 3
+    gesture_confidence_threshold: float = 0.75
+
+
+# Preset profiles for cursor response and gesture interaction
+CURSOR_PROFILES: dict[str, dict[str, Any]] = {
+    "Balanced": {
+        "cursor_sensitivity": 1.0,
+        "cursor_smoothing": 0.35,
+        "smoothing_filter_type": "one_euro",
+        "one_euro_min_cutoff": 1.0,
+        "one_euro_beta": 0.007,
+        "one_euro_d_cutoff": 1.0,
+        "precision_multiplier": 0.35,
+        "max_cursor_velocity": 4000.0,
+        "click_strategy": "deferred",
+    },
+    "Precision": {
+        "cursor_sensitivity": 0.7,
+        "cursor_smoothing": 0.60,
+        "smoothing_filter_type": "one_euro",
+        "one_euro_min_cutoff": 0.4,
+        "one_euro_beta": 0.002,
+        "one_euro_d_cutoff": 1.0,
+        "precision_multiplier": 0.20,
+        "max_cursor_velocity": 2500.0,
+        "click_strategy": "deferred",
+    },
+    "Responsive": {
+        "cursor_sensitivity": 1.4,
+        "cursor_smoothing": 0.20,
+        "smoothing_filter_type": "one_euro",
+        "one_euro_min_cutoff": 1.8,
+        "one_euro_beta": 0.020,
+        "one_euro_d_cutoff": 1.0,
+        "precision_multiplier": 0.40,
+        "max_cursor_velocity": 5000.0,
+        "click_strategy": "native",
+    },
+}
+
 
 @dataclass
 class ControllerSettings:
@@ -90,6 +136,10 @@ class ControllerSettings:
     scroll_sensitivity: float = 1.0
     scroll_dead_zone: float = 0.008
     scroll_update_interval: float = 0.04
+
+    # Phase 3 additions:
+    click_strategy: str = "deferred"  # "deferred" (Safe Deferred) or "native" (Responsive Native)
+    cursor_profile: str = "Balanced"  # "Balanced", "Precision", "Responsive", "Custom"
 
 
 @dataclass
@@ -140,6 +190,15 @@ class Settings:
             )
             self.pyautogui.failsafe = True
 
+        # Validate gesture settings
+        self.gestures.pinch_threshold = max(0.01, min(0.3, float(self.gestures.pinch_threshold)))
+        self.gestures.pinch_release_threshold = max(self.gestures.pinch_threshold, min(0.4, float(self.gestures.pinch_release_threshold)))
+        self.gestures.pinch_activation_threshold = max(0.01, min(0.3, float(self.gestures.pinch_activation_threshold)))
+        self.gestures.pinch_stability_frames = max(1, min(10, int(self.gestures.pinch_stability_frames)))
+        self.gestures.gesture_history_size = max(2, min(20, int(self.gestures.gesture_history_size)))
+        self.gestures.gesture_stability_frames = max(1, min(self.gestures.gesture_history_size, int(self.gestures.gesture_stability_frames)))
+        self.gestures.gesture_confidence_threshold = max(0.1, min(1.0, float(self.gestures.gesture_confidence_threshold)))
+
         # Validate controller settings
         self.controller.cursor_sensitivity = max(0.1, min(5.0, float(self.controller.cursor_sensitivity)))
         self.controller.cursor_smoothing = max(0.01, min(1.0, float(self.controller.cursor_smoothing)))
@@ -162,6 +221,45 @@ class Settings:
         self.controller.scroll_sensitivity = max(0.1, min(10.0, float(self.controller.scroll_sensitivity)))
         self.controller.scroll_dead_zone = max(0.001, min(0.1, float(self.controller.scroll_dead_zone)))
         self.controller.scroll_update_interval = max(0.01, min(0.5, float(self.controller.scroll_update_interval)))
+
+        # Validate Phase 3 controller settings
+        c_strat = str(self.controller.click_strategy).lower().strip()
+        self.controller.click_strategy = "native" if c_strat == "native" else "deferred"
+        prof = str(self.controller.cursor_profile).strip().capitalize()
+        self.controller.cursor_profile = prof if prof in ("Balanced", "Precision", "Responsive", "Custom") else "Balanced"
+
+    def apply_cursor_profile(self, profile_name: str) -> bool:
+        """
+        Apply a preset cursor response profile without altering calibration or camera setup.
+
+        Parameters
+        ----------
+        profile_name:
+            "Balanced", "Precision", "Responsive", or "Custom".
+
+        Returns
+        -------
+        bool:
+            True if profile applied successfully, False if profile unknown.
+        """
+        p_name = str(profile_name).strip().capitalize()
+        if p_name == "Custom":
+            self.controller.cursor_profile = "Custom"
+            return True
+
+        if p_name not in CURSOR_PROFILES:
+            log.warning("Unknown cursor profile '%s' requested.", profile_name)
+            return False
+
+        preset = CURSOR_PROFILES[p_name]
+        for k, v in preset.items():
+            if hasattr(self.controller, k):
+                setattr(self.controller, k, v)
+
+        self.controller.cursor_profile = p_name
+        self.__post_init__()
+        log.info("Applied cursor profile: %s", p_name)
+        return True
 
     @classmethod
     def load(

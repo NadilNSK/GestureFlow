@@ -236,6 +236,16 @@ class MouseController:
         return self._double_click_count
 
     @property
+    def click_strategy(self) -> str:
+        """Current click dispatch strategy ('deferred' or 'native')."""
+        return getattr(self._settings, "click_strategy", "deferred")
+
+    @property
+    def cursor_profile(self) -> str:
+        """Current cursor response profile name."""
+        return getattr(self._settings, "cursor_profile", "Balanced")
+
+    @property
     def scroll_direction(self) -> str:
         return self._scroll_direction
 
@@ -406,6 +416,46 @@ class MouseController:
         """Assign an updated Calibrator instance."""
         self._calibrator = calibrator
         self.reset_smoothing()
+
+    def set_click_strategy(self, strategy: str) -> None:
+        """
+        Set click strategy ('deferred' for Safe Deferred, 'native' for Responsive Native).
+        """
+        strat = str(strategy).lower().strip()
+        self._settings.click_strategy = "native" if strat == "native" else "deferred"
+        self._pending_click_time = None
+        log.info("MouseController: click strategy set to %s", self._settings.click_strategy)
+
+    def set_cursor_profile(self, profile_name: str) -> bool:
+        """
+        Apply a preset cursor response profile ('Balanced', 'Precision', 'Responsive', 'Custom').
+
+        Preserves 4-point calibration and active tracking region.
+        """
+        from gestureflow.config.settings import CURSOR_PROFILES
+
+        p_name = str(profile_name).strip().capitalize()
+        if p_name == "Custom":
+            self._settings.cursor_profile = "Custom"
+            return True
+
+        if p_name not in CURSOR_PROFILES:
+            log.warning("Unknown cursor profile '%s'.", profile_name)
+            return False
+
+        preset = CURSOR_PROFILES[p_name]
+        for k, v in preset.items():
+            if hasattr(self._settings, k):
+                setattr(self._settings, k, v)
+
+        # Update One Euro parameters on active filter
+        self._one_euro.min_cutoff = self._settings.one_euro_min_cutoff
+        self._one_euro.beta = self._settings.one_euro_beta
+        self._one_euro.d_cutoff = self._settings.one_euro_d_cutoff
+        self._settings.cursor_profile = p_name
+        self.reset_smoothing()
+        log.info("MouseController: applied cursor profile '%s'.", p_name)
+        return True
 
     def get_cursor_position(self) -> tuple[int, int]:
         """Read the current cursor position via PyAutoGUI or last known pos."""
@@ -629,44 +679,45 @@ class MouseController:
     # Mouse Action Execution (Left, Double, Right, Drag, Scroll)
     # ------------------------------------------------------------------
 
-    def click(self, button: str = "left") -> bool:
+    def click(self, button: str = "left", timestamp: Optional[float] = None) -> bool:
         """
         Execute a single mouse click.
         """
         if not self._can_execute_actions():
             return False
 
+        now = time.monotonic() if timestamp is None else float(timestamp)
         btn = button.lower()
         try:
             if btn == "left":
                 self._pag.click(button="left")
                 self._left_click_count += 1
                 self._last_action = "LEFT CLICK"
-                self._last_left_click_time = time.monotonic()
+                self._last_left_click_time = now
                 log.info("Virtual Mouse: LEFT CLICK executed (total: %d)", self._left_click_count)
             elif btn == "right":
                 self._pag.rightClick()
                 self._right_click_count += 1
                 self._last_action = "RIGHT CLICK"
-                self._last_right_click_time = time.monotonic()
+                self._last_right_click_time = now
                 log.info("Virtual Mouse: RIGHT CLICK executed (total: %d)", self._right_click_count)
             return True
         except Exception as exc:
             self._handle_pag_exception(exc)
             raise
 
-    def double_click(self) -> bool:
+    def double_click(self, timestamp: Optional[float] = None) -> bool:
         """
         Execute a double-click action.
         """
         if not self._can_execute_actions():
             return False
 
+        now = time.monotonic() if timestamp is None else float(timestamp)
         try:
             self._pag.doubleClick(button="left")
             self._double_click_count += 1
             self._last_action = "DOUBLE CLICK"
-            now = time.monotonic()
             self._last_double_click_time = now
             self._last_left_click_time = now
             log.info("Virtual Mouse: DOUBLE CLICK executed (total: %d)", self._double_click_count)
@@ -675,11 +726,11 @@ class MouseController:
             self._handle_pag_exception(exc)
             raise
 
-    def right_click(self) -> bool:
+    def right_click(self, timestamp: Optional[float] = None) -> bool:
         """
         Execute a right click.
         """
-        return self.click(button="right")
+        return self.click(button="right", timestamp=timestamp)
 
     def mouse_down(self, button: str = "left") -> bool:
         """
@@ -790,11 +841,19 @@ class MouseController:
         # 1. Check expiration of pending single click (Double Click State Machine)
         if self._pending_click_time is not None:
             if (now - self._pending_click_time) >= self._settings.double_click_interval:
-                # Double-click interval expired without 2nd pinch -> fire single left click!
-                self._pending_click_time = None
-                self.click(button="left")
-                if self._action_state == MouseActionState.CLICK_PENDING:
-                    self._action_state = MouseActionState.IDLE
+                # Double-click interval expired:
+                strategy = getattr(self._settings, "click_strategy", "deferred")
+                if strategy == "deferred":
+                    # Deferred strategy: fire the delayed single click now!
+                    self._pending_click_time = None
+                    self.click(button="left", timestamp=now)
+                    if self._action_state == MouseActionState.CLICK_PENDING:
+                        self._action_state = MouseActionState.IDLE
+                else:
+                    # Native strategy: first click was already fired immediately!
+                    self._pending_click_time = None
+                    if self._action_state == MouseActionState.CLICK_PENDING:
+                        self._action_state = MouseActionState.IDLE
 
         # 2. Hand lost: release any held button safely, reset smoothing and gestures
         if active_hand is None or gesture_result is None:
@@ -879,7 +938,7 @@ class MouseController:
             if not self._is_dragging and self._settings.right_click_enabled:
                 if not self._right_pinch_triggered:
                     if (now - self._last_right_click_time) >= self._settings.click_cooldown:
-                        self.right_click()
+                        self.right_click(timestamp=now)
                         self._right_pinch_triggered = True
                         self._action_state = MouseActionState.RIGHT_PINCH_PENDING
             self._state = MouseState.IDLE
@@ -927,24 +986,43 @@ class MouseController:
             log.debug("Left pinch ignored due to click cooldown.")
             return
 
+        strategy = getattr(self._settings, "click_strategy", "deferred")
+
         if self._settings.double_click_enabled:
             if (
                 self._pending_click_time is not None
                 and (now - self._pending_click_time) <= self._settings.double_click_interval
             ):
-                # Valid second pinch within window -> DOUBLE CLICK!
-                self._pending_click_time = None
-                self.double_click()
-                self._state = MouseState.IDLE
-                self._action_state = MouseActionState.IDLE
+                if strategy == "native":
+                    # Native Strategy: Second click executed immediately; Windows registers native double click!
+                    self._pending_click_time = None
+                    self.click(button="left", timestamp=now)
+                    self._double_click_count += 1
+                    self._last_action = "DOUBLE CLICK (NATIVE)"
+                    log.info("Virtual Mouse: NATIVE DOUBLE CLICK (2nd click, total: %d)", self._double_click_count)
+                    self._state = MouseState.IDLE
+                    self._action_state = MouseActionState.IDLE
+                else:
+                    # Safe Deferred Strategy: Fire single logical doubleClick action!
+                    self._pending_click_time = None
+                    self.double_click(timestamp=now)
+                    self._state = MouseState.IDLE
+                    self._action_state = MouseActionState.IDLE
             else:
-                # First pinch: start double-click window
-                self._pending_click_time = now
-                self._state = MouseState.IDLE
-                self._action_state = MouseActionState.CLICK_PENDING
+                if strategy == "native":
+                    # Native Strategy: Fire first click IMMEDIATELY without waiting!
+                    self.click(button="left", timestamp=now)
+                    self._pending_click_time = now
+                    self._state = MouseState.IDLE
+                    self._action_state = MouseActionState.CLICK_PENDING
+                else:
+                    # Safe Deferred Strategy: Start double-click window
+                    self._pending_click_time = now
+                    self._state = MouseState.IDLE
+                    self._action_state = MouseActionState.CLICK_PENDING
         else:
             # Double click disabled: issue single click immediately
-            self.click(button="left")
+            self.click(button="left", timestamp=now)
             self._state = MouseState.IDLE
             self._action_state = MouseActionState.IDLE
 

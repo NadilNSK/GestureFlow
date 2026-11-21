@@ -1,6 +1,6 @@
 {
   "camera": {
-    "device_index": 1,
+    "device_index": 0,
     "backend": "DSHOW",
     "frame_width": 640,
     "frame_height": 480,
@@ -20,7 +20,13 @@
     "pinch_release_threshold": 0.085,
     "confirmation_frames": 3,
     "loss_tolerance_frames": 3,
-    "preferred_handedness": "Right"
+    "preferred_handedness": "Right",
+    "adaptive_pinch_enabled": true,
+    "pinch_activation_threshold": 0.065,
+    "pinch_stability_frames": 3,
+    "gesture_history_size": 5,
+    "gesture_stability_frames": 3,
+    "gesture_confidence_threshold": 0.75
   },
   "controller": {
     "smoothing_factor": 7,
@@ -51,7 +57,9 @@
     "drag_hold_duration": 0.45,
     "scroll_sensitivity": 1.0,
     "scroll_dead_zone": 0.008,
-    "scroll_update_interval": 0.04
+    "scroll_update_interval": 0.04,
+    "click_strategy": "deferred",
+    "cursor_profile": "Balanced"
   },
   "ui": {
     "window_width": 1100,

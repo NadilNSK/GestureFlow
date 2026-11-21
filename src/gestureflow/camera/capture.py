@@ -38,6 +38,8 @@ class CameraFrame:
     timestamp_ms: int          # Milliseconds since capture start
     frame_index: int           # 0-based frame counter
     fps: float                 # Measured FPS at the moment of capture
+    capture_perf_time: float = 0.0  # Monotonic perf_counter timestamp
+    frame_age_ms: float = 0.0  # Measured age of frame at processing
 
 
 @dataclass
@@ -258,6 +260,7 @@ class CameraCapture:
 
                 # FPS calculation (rolling window of 30 frames).
                 now = time.monotonic()
+                t_perf = time.perf_counter()
                 fps_times.append(now)
                 if len(fps_times) > 30:
                     fps_times.pop(0)
@@ -274,6 +277,8 @@ class CameraCapture:
                     timestamp_ms=timestamp_ms,
                     frame_index=frame_index,
                     fps=fps,
+                    capture_perf_time=t_perf,
+                    frame_age_ms=0.0,
                 )
                 frame_index += 1
 
@@ -335,6 +340,8 @@ class CameraCapture:
                     timestamp_ms=timestamp_ms,
                     frame_index=frame_index,
                     fps=fps,
+                    capture_perf_time=time.perf_counter(),
+                    frame_age_ms=0.0,
                 )
                 frame_index += 1
 

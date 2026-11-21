@@ -152,13 +152,16 @@ def _compute_palm_scale(p: np.ndarray) -> float:
     """
     Compute reference palm scale invariant to distance and hand orientation.
 
-    Distance between Wrist (0) and Middle MCP (9), with fallback to
-    Index MCP (5) to Pinky MCP (17).
+    Combines palm length (Wrist 0 to Middle MCP 9) and palm width
+    (Index MCP 5 to Pinky MCP 17) to provide robust normalization
+    across all pitch and yaw angles.
     """
     d09 = float(np.linalg.norm(p[9] - p[0]))
+    d517 = float(np.linalg.norm(p[17] - p[5]))
+    if d09 > 1e-4 and d517 > 1e-4:
+        return (d09 + d517) * 0.5
     if d09 > 1e-4:
         return d09
-    d517 = float(np.linalg.norm(p[17] - p[5]))
     return d517 if d517 > 1e-4 else 1.0
 
 
@@ -318,6 +321,12 @@ class GestureClassifier:
         self._current_handedness: str = "Unknown"
         self._current_pinch_distance: float = 0.0
 
+        # Phase 3: Temporal Stabilization & History Queue
+        hist_size = max(2, getattr(self._settings, "gesture_history_size", 5))
+        self._history: deque[tuple[Gesture, float]] = deque(maxlen=hist_size)
+        self._prev_index_pinch: Optional[float] = None
+        self._prev_middle_pinch: Optional[float] = None
+
         # Debounce / candidate confirmation counter
         self._candidate_gesture: Gesture = Gesture.UNKNOWN
         self._candidate_count: int = 0
@@ -345,6 +354,9 @@ class GestureClassifier:
         self._left_pinch_active = False
         self._right_pinch_active = False
         self._loss_counter = 0
+        self._history.clear()
+        self._prev_index_pinch = None
+        self._prev_middle_pinch = None
 
     def classify(self, hand: Optional[HandLandmarks]) -> GestureResult:
         """
@@ -367,8 +379,11 @@ class GestureClassifier:
         ):
             return self._handle_tracking_loss()
 
-        self._loss_counter = 0
         p = _to_numpy_coords(hand.landmarks)
+        if p.shape[0] < 21 or np.any(np.isnan(p)) or np.any(np.isinf(p)):
+            return self._handle_tracking_loss()
+
+        self._loss_counter = 0
         handedness = hand.handedness or "Right"
         self._current_handedness = handedness
 
@@ -376,25 +391,47 @@ class GestureClassifier:
         finger_states = detect_finger_states(p, handedness=handedness)
         self._current_finger_states = finger_states
 
-        # 2. Compute normalized pinch distances
-        d_index_pinch = calculate_pinch_distance(p, finger_tip_idx=8)
-        d_middle_pinch = calculate_pinch_distance(p, finger_tip_idx=12)
+        # 2. Compute normalized pinch distances with stable palm scale
+        palm_scale = _compute_palm_scale(p)
+        raw_index_pinch = float(np.linalg.norm(p[4] - p[8]))
+        raw_middle_pinch = float(np.linalg.norm(p[4] - p[12]))
 
-        # 3. Apply hysteresis for pinch states
-        th_enter = self._settings.pinch_threshold
-        th_release = self._settings.pinch_release_threshold
+        is_adaptive = getattr(self._settings, "adaptive_pinch_enabled", True)
+        if is_adaptive and palm_scale > 1e-4:
+            d_index_pinch = raw_index_pinch / palm_scale
+            d_middle_pinch = raw_middle_pinch / palm_scale
+        else:
+            d_index_pinch = raw_index_pinch
+            d_middle_pinch = raw_middle_pinch
 
-        # Left pinch hysteresis (Thumb + Index)
+        # Jump rejection: prevent single-frame tracking glitch from triggering pinch
+        if self._prev_index_pinch is not None and not self._left_pinch_active:
+            if abs(d_index_pinch - self._prev_index_pinch) > 0.45:
+                d_index_pinch = self._prev_index_pinch + np.sign(d_index_pinch - self._prev_index_pinch) * 0.45
+        self._prev_index_pinch = d_index_pinch
+
+        if self._prev_middle_pinch is not None and not self._right_pinch_active:
+            if abs(d_middle_pinch - self._prev_middle_pinch) > 0.45:
+                d_middle_pinch = self._prev_middle_pinch + np.sign(d_middle_pinch - self._prev_middle_pinch) * 0.45
+        self._prev_middle_pinch = d_middle_pinch
+
+        # 3. Apply hysteresis & mutual exclusion for pinch states
+        th_enter = getattr(self._settings, "pinch_activation_threshold", self._settings.pinch_threshold)
+        th_release = getattr(self._settings, "pinch_release_threshold", 0.085)
+
         if self._left_pinch_active:
-            self._left_pinch_active = (d_index_pinch <= th_release) and (d_index_pinch <= d_middle_pinch)
+            self._left_pinch_active = (d_index_pinch <= th_release) and (d_index_pinch <= d_middle_pinch + 0.02)
+            self._right_pinch_active = False
+        elif self._right_pinch_active:
+            self._right_pinch_active = (d_middle_pinch <= th_release) and (d_middle_pinch <= d_index_pinch + 0.02)
+            self._left_pinch_active = False
         else:
-            self._left_pinch_active = (d_index_pinch <= th_enter) and (d_index_pinch <= d_middle_pinch)
-
-        # Right pinch hysteresis (Thumb + Middle)
-        if self._right_pinch_active:
-            self._right_pinch_active = (d_middle_pinch <= th_release) and (d_middle_pinch <= d_index_pinch)
-        else:
-            self._right_pinch_active = (d_middle_pinch <= th_enter) and (d_middle_pinch <= d_index_pinch)
+            if d_index_pinch <= th_enter and d_index_pinch <= d_middle_pinch:
+                self._left_pinch_active = True
+                self._right_pinch_active = False
+            elif d_middle_pinch <= th_enter and d_middle_pinch < d_index_pinch:
+                self._right_pinch_active = True
+                self._left_pinch_active = False
 
         # 4. Classify raw gesture by strict priority
         raw_gesture, raw_conf, pinch_dist = self._classify_raw(
@@ -406,19 +443,41 @@ class GestureClassifier:
 
         self._current_pinch_distance = pinch_dist
 
-        # 5. Temporal debouncing & confirmation frames
+        # 5. Temporal stabilization layer (History & Confidence-Weighted Voting)
+        self._history.append((raw_gesture, raw_conf))
+
         if raw_gesture == self._candidate_gesture:
             self._candidate_count += 1
         else:
             self._candidate_gesture = raw_gesture
             self._candidate_count = 1
 
-        required_frames = max(1, self._settings.confirmation_frames)
-        is_stable = self._candidate_count >= required_frames
+        # Calculate vote distribution across history
+        votes: dict[Gesture, float] = {}
+        counts: dict[Gesture, int] = {}
+        for g, c in self._history:
+            votes[g] = votes.get(g, 0.0) + c
+            counts[g] = counts.get(g, 0) + 1
+
+        top_gesture = max(votes.keys(), key=lambda g: votes[g])
+        top_count = counts[top_gesture]
+        mean_conf = votes[top_gesture] / max(1, top_count)
+
+        # Gesture-specific confirmation requirement
+        base_req = getattr(self._settings, "confirmation_frames", 3)
+        if top_gesture in (Gesture.LEFT_PINCH, Gesture.RIGHT_PINCH):
+            req_frames = getattr(self._settings, "pinch_stability_frames", base_req)
+        elif top_gesture == Gesture.POINTING:
+            req_frames = base_req
+        else:
+            req_frames = base_req
+
+        min_conf = getattr(self._settings, "gesture_confidence_threshold", 0.75)
+        is_stable = (self._candidate_count >= req_frames) and (top_count >= req_frames)
 
         if is_stable:
-            self._confirmed_gesture = self._candidate_gesture
-            self._current_confidence = raw_conf
+            self._confirmed_gesture = top_gesture
+            self._current_confidence = max(raw_conf, mean_conf)
         else:
             # During transition, decay current confidence slightly
             self._current_confidence = max(0.2, self._current_confidence * 0.9)
